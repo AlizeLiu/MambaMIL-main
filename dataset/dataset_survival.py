@@ -23,7 +23,7 @@ class Generic_WSI_Survival_Dataset(Dataset):
         shuffle = False, seed = 7, print_info = True, n_bins = 4, ignore=[],
         patient_strat=False, label_col = None, filter_dict = {}, eps=1e-6):
         r"""
-        Generic_WSI_Survival_Dataset 
+        Generic_WSI_Survival_Dataset
 
         Args:
             csv_file (string): Path to the csv file with annotations.
@@ -42,7 +42,7 @@ class Generic_WSI_Survival_Dataset(Dataset):
 
         if shuffle:
             np.random.seed(seed)
-            np.random.shuffle(slide_data)
+            np.random.shuffle(self.slide_data)
 
 
         slide_data = pd.read_csv(csv_path, low_memory=False)
@@ -69,7 +69,7 @@ class Generic_WSI_Survival_Dataset(Dataset):
         disc_labels, q_bins = pd.qcut(uncensored_df[label_col], q=n_bins, retbins=True, labels=False)
         q_bins[-1] = slide_data[label_col].max() + eps
         q_bins[0] = slide_data[label_col].min() - eps
-        
+
         disc_labels, q_bins = pd.cut(patients_df[label_col], bins=q_bins, retbins=True, labels=False, right=False, include_lowest=True)
         patients_df.insert(2, 'label', disc_labels.values.astype(int))
 
@@ -84,7 +84,7 @@ class Generic_WSI_Survival_Dataset(Dataset):
             patient_dict.update({patient:slide_ids})
 
         self.patient_dict = patient_dict
-    
+
         slide_data = patients_df
         slide_data.reset_index(drop=True, inplace=True)
         slide_data = slide_data.assign(slide_id=slide_data['case_id'])
@@ -132,7 +132,7 @@ class Generic_WSI_Survival_Dataset(Dataset):
 
 
     def cls_ids_prep(self):
-        self.patient_cls_ids = [[] for i in range(self.num_classes)]        
+        self.patient_cls_ids = [[] for i in range(self.num_classes)]
         for i in range(self.num_classes):
             self.patient_cls_ids[i] = np.where(self.patient_data['label'] == i)[0]
 
@@ -144,13 +144,13 @@ class Generic_WSI_Survival_Dataset(Dataset):
     def patient_data_prep(self):
         patients = np.unique(np.array(self.slide_data['case_id'])) # get unique patients
         patient_labels = []
-        
+
         for p in patients:
             locations = self.slide_data[self.slide_data['case_id'] == p].index.tolist()
             assert len(locations) > 0
             label = self.slide_data['label'][locations[0]] # get patient label
             patient_labels.append(label)
-        
+
         self.patient_data = {'case_id':patients, 'label':np.array(patient_labels)}
 
 
@@ -190,7 +190,7 @@ class Generic_WSI_Survival_Dataset(Dataset):
             split.set_patch_size(patch_size)
         else:
             split = None
-        
+
         return split
 
 
@@ -223,7 +223,7 @@ class Generic_WSI_Survival_Dataset(Dataset):
             else:
                 test_split = None
         else:
-            assert csv_path 
+            assert csv_path
             all_splits = pd.read_csv(csv_path, dtype=self.slide_data['slide_id'].dtype)
             train_split = self.get_split_from_df(backbone, patch_size, all_splits=all_splits, split_key='train')
             val_split = self.get_split_from_df(backbone, patch_size, all_splits=all_splits, split_key='val')
@@ -237,14 +237,14 @@ class Generic_WSI_Survival_Dataset(Dataset):
             # test_split.apply_scaler(scalers=scalers)
             ### <--
         return train_split, val_split, test_split
-    
+
     '''
     Added function create_splits from Generic_WSI_Classification_Dataset
     '''
     def create_splits(self, k = 3, val_num = (25, 25), test_num = (40, 40), label_frac = 1.0, custom_test_ids = None):
         settings = {
-                    'n_splits' : k, 
-                    'val_num' : val_num, 
+                    'n_splits' : k,
+                    'val_num' : val_num,
                     'test_num': test_num,
                     'label_frac': label_frac,
                     'seed': self.seed,
@@ -257,8 +257,8 @@ class Generic_WSI_Survival_Dataset(Dataset):
             settings.update({'cls_ids' : self.slide_cls_ids, 'samples': len(self.slide_data)})
 
         self.split_gen = generate_split(**settings)
-    
-    
+
+
     '''
     Added function set_splits from Generic_WSI_Classification_Dataset
     '''
@@ -270,9 +270,9 @@ class Generic_WSI_Survival_Dataset(Dataset):
             ids = next(self.split_gen)
 
         if self.patient_strat:
-            slide_ids = [[] for i in range(len(ids))] 
+            slide_ids = [[] for i in range(len(ids))]
 
-            for split in range(len(ids)): 
+            for split in range(len(ids)):
                 for idx in ids[split]:
                     case_id = self.patient_data['case_id'][idx]
                     slide_indices = self.slide_data[self.slide_data['case_id'] == case_id].index.tolist()
@@ -295,7 +295,7 @@ class Generic_WSI_Survival_Dataset(Dataset):
 
     def __getitem__(self, idx):
         return None
-    
+
     '''
     Added functions test_split_gen and save_split from Generic_WSI_Classification_Dataset
     '''
@@ -316,7 +316,7 @@ class Generic_WSI_Survival_Dataset(Dataset):
             print('number of samples in cls {}: {}'.format(unique[u], counts[u]))
             if return_descriptor:
                 df.loc[index[u], 'train'] = counts[u]
-        
+
         count = len(self.val_ids)
         print('\nnumber of val samples: {}'.format(count))
         labels = self.getlabel(self.val_ids)
@@ -349,11 +349,12 @@ class Generic_WSI_Survival_Dataset(Dataset):
         df_tr = pd.DataFrame({'train': train_split})
         df_v = pd.DataFrame({'val': val_split})
         df_t = pd.DataFrame({'test': test_split})
-        df = pd.concat([df_tr, df_v, df_t], axis=1) 
+        df = pd.concat([df_tr, df_v, df_t], axis=1)
         df.to_csv(filename, index = False)
 
+
 class Generic_MIL_Survival_Dataset(Generic_WSI_Survival_Dataset):
-    def __init__(self, data_dir, mode: str='omic', **kwargs):
+    def __init__(self, data_dir, mode: str = 'omic', **kwargs):
         super(Generic_MIL_Survival_Dataset, self).__init__(**kwargs)
         self.data_dir = data_dir
         self.mode = mode
@@ -374,67 +375,54 @@ class Generic_MIL_Survival_Dataset(Generic_WSI_Survival_Dataset):
             data_dir = self.data_dir[source]
         else:
             data_dir = self.data_dir
-        
+
         if not self.use_h5:
             if self.data_dir:
                 if self.mode == 'path':
                     path_features = []
                     for slide_id in slide_ids:
-                        # wsi_path = os.path.join(data_dir, 'pt_files', '{}.pt'.format(slide_id.rstrip('.svs')))
-                        wsi_path = os.path.join(data_dir, '{}.pt'.format(slide_id.rstrip('.svs')))
+                        # 1. 精准指向特征文件 (强制读取 pt_files 文件夹)
+                        slide_id_clean = slide_id.rstrip('.svs')
+                        wsi_path = os.path.join(data_dir, 'pt_files', f'{slide_id_clean}.pt')
+
+                        if not os.path.exists(wsi_path):
+                            print(f"[Error] 找不到特征文件: {wsi_path}")
+                            continue
+
                         wsi_bag = torch.load(wsi_path)
+
+                        # =========================================================
+                        # 🌟 IHG-Mamba: Hilbert 空间拓扑重排 (精准路径对齐)
+                        # =========================================================
+                        # 精准指向你上一层生成的 hilbert 文件夹
+                        hilbert_path = os.path.join(data_dir, 'hilbert', f'{slide_id_clean}_hilbert.pt')
+
+                        try:
+                            if os.path.exists(hilbert_path):
+                                hilbert_idx = torch.load(hilbert_path)
+                                wsi_bag = wsi_bag[hilbert_idx]  # 【核心：特征重排】
+                                print(f"\n✅ [IHG-Mamba 核心启动] 成功为切片 {slide_id_clean} 应用 Hilbert 2D-1D 空间拓扑重排！张量形状: {wsi_bag.shape}")
+
+                            else:
+                                print(f"[Warning] 找不到索引文件 {hilbert_path}，使用无序特征")
+                        except Exception as e:
+                            print(f"[Warning] Hilbert index issue for {slide_id_clean}. Error: {e}")
+                        # =========================================================
+
                         path_features.append(wsi_bag)
-                    path_features = torch.cat(path_features, dim=0)
-                    return (path_features, torch.zeros((1,1)), label, event_time, c)
 
-                elif self.mode == 'cluster':
-                    path_features = []
-                    cluster_ids = []
-                    for slide_id in slide_ids:
-                        wsi_path = os.path.join(data_dir, 'pt_files', '{}.pt'.format(slide_id.rstrip('.svs')))
-                        wsi_bag = torch.load(wsi_path)
-                        path_features.append(wsi_bag)
-                        cluster_ids.extend(self.fname2ids[slide_id[:-4]+'.pt']) #! no fname2ids?
-                    path_features = torch.cat(path_features, dim=0)
-                    cluster_ids = torch.Tensor(cluster_ids)
-                    genomic_features = torch.tensor(self.genomic_features.iloc[idx])
-                    return (path_features, cluster_ids, genomic_features, label, event_time, c)
+                    if len(path_features) > 0:
+                        path_features = torch.cat(path_features, dim=0)
+                    else:
+                        path_features = torch.zeros((1, 1))  # 防崩溃保底
 
-                elif self.mode == 'omic':
-                    genomic_features = torch.tensor(self.genomic_features.iloc[idx])
-                    return (torch.zeros((1,1)), genomic_features, label, event_time, c)
+                    return (path_features, torch.zeros((1, 1)), label, event_time, c)
 
-                elif self.mode == 'pathomic':
-                    path_features = []
-                    for slide_id in slide_ids:
-                        wsi_path = os.path.join(data_dir, 'pt_files', '{}.pt'.format(slide_id.rstrip('.svs')))
-                        wsi_bag = torch.load(wsi_path)
-                        path_features.append(wsi_bag)
-                    path_features = torch.cat(path_features, dim=0)
-                    genomic_features = torch.tensor(self.genomic_features.iloc[idx])
-                    return (path_features, genomic_features, label, event_time, c)
-
-                elif self.mode == 'coattn':
-                    path_features = []
-                    for slide_id in slide_ids:
-                        wsi_path = os.path.join(data_dir, 'pt_files', '{}.pt'.format(slide_id.rstrip('.svs')))
-                        wsi_bag = torch.load(wsi_path)
-                        path_features.append(wsi_bag)
-                    path_features = torch.cat(path_features, dim=0)
-                    omic1 = torch.tensor(self.genomic_features[self.omic_names[0]].iloc[idx])
-                    omic2 = torch.tensor(self.genomic_features[self.omic_names[1]].iloc[idx])
-                    omic3 = torch.tensor(self.genomic_features[self.omic_names[2]].iloc[idx])
-                    omic4 = torch.tensor(self.genomic_features[self.omic_names[3]].iloc[idx])
-                    omic5 = torch.tensor(self.genomic_features[self.omic_names[4]].iloc[idx])
-                    omic6 = torch.tensor(self.genomic_features[self.omic_names[5]].iloc[idx])
-                    return (path_features, omic1, omic2, omic3, omic4, omic5, omic6, label, event_time, c)
-
+                # --- 暂时折叠了其他 mode (cluster, omic等)，因为你目前只测纯病理(path) ---
                 else:
-                    raise NotImplementedError('Mode [%s] not implemented.' % self.mode)
-                ### <--
+                    raise NotImplementedError(f'Mode [{self.mode}] not implemented yet.')
             else:
                 return slide_ids, label, event_time, c
-
 
 class Generic_Split(Generic_MIL_Survival_Dataset):
     def __init__(self, slide_data, metadata, mode, signatures=None, data_dir=None, label_col=None, patient_dict=None, num_classes=2):

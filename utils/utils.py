@@ -15,7 +15,7 @@ import torch.nn.functional as F
 import math
 from itertools import islice
 import collections
-from survival_utils import collate_MIL_survival
+from utils.survival_utils import collate_MIL_survival
 device=torch.device("cuda" if torch.cuda.is_available() else "cpu")
 
 class SubsetSequentialSampler(Sampler):

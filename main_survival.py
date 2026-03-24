@@ -182,6 +182,8 @@ parser.add_argument('--mambamil_rate',type=int, default=10, help='mambamil_rate'
 parser.add_argument('--mambamil_layer',type=int, default=2, help='mambamil_layer')
 parser.add_argument('--mambamil_type',type=str, default='SRMamba', choices= ['Mamba', 'BiMamba', 'SRMamba'], help='mambamil_type')
 
+parser.add_argument('--csv_path', type=str, default=None, help='path to the dataset csv file')
+
 args = parser.parse_args()
 
 device=torch.device("cuda" if torch.cuda.is_available() else "cpu")
@@ -225,27 +227,33 @@ settings = {'num_splits': args.k,
 
 print('\nLoad Dataset')
 
+print('\nLoad Dataset')
+
+# 只要没传任务名，我们就给个默认的 toy_survival，防止下面报错
+if args.task is None:
+    args.task = 'toy_survival'
+
 if 'survival' in args.task:
     args.n_classes = 4
-    study = '_'.join(args.task.split('_')[:2])
-    
-    combined_study = study
-    combined_study = combined_study.split('_')[1]
-    # study_dir = '%s_20x_features' % combined_study
-    study_dir = 'pt_files/%s' % args.backbone
-    dataset = Generic_MIL_Survival_Dataset(csv_path = 'dataset_csv/%s_processed.csv' % combined_study,
-                                            mode = args.mode,
-                                            apply_sig = args.apply_sig,
-                                            data_dir= os.path.join(args.data_root_dir, study_dir), #! cluster.pkl should be as same as data_dir
-                                            shuffle = False, 
-                                            seed = args.seed, 
-                                            print_info = True,
-                                            patient_strat= False,
-                                            n_bins=4,
-                                            label_col = 'survival_months',
-                                            ignore=[])
+
+    # 🌟 IHG-Mamba: 灵活的数据源读取逻辑
+    # 如果命令行传了 csv_path，就用命令行的；否则用原版的字符串硬切逻辑
+    csv_to_load = args.csv_path if args.csv_path else 'dataset_csv/%s_processed.csv' % args.task.split('_')[1]
+
+    dataset = Generic_MIL_Survival_Dataset(csv_path=csv_to_load,
+                                           mode=args.mode,
+                                           apply_sig=args.apply_sig,
+                                           data_dir=args.data_root_dir,  # <-- 直接使用我们传入的根目录！
+                                           shuffle=False,
+                                           seed=args.seed,
+                                           print_info=True,
+                                           patient_strat=False,
+                                           n_bins=4,
+                                           label_col='survival_months',
+                                           ignore=[])
 else:
-	raise NotImplementedError
+    raise NotImplementedError
+
 
 if isinstance(dataset, Generic_MIL_Survival_Dataset):
 	args.task_type = 'survival'
