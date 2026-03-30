@@ -21,6 +21,9 @@ def main(args):
     if not os.path.isdir(args.results_dir):
         os.mkdir(args.results_dir)
 
+#TODO：训练时修改为在线模式，测试时修改为离线模式，避免每次都要输入 API Key
+    # 强制 Wandb 在离线模式下运行，不再索要 API Key！
+    os.environ["WANDB_MODE"] = "disabled"
     wandb.init(project=args.task)
     wandb.config.update(args)
     if args.k_start == -1:
