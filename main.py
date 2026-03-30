@@ -16,7 +16,8 @@ import numpy as np
 import wandb
 # torch.use_deterministic_algorithms(True)
 def main(args):
-
+    #TODO: add wandb logging
+    os.environ["WANDB_MODE"] = "disabled"
     wandb.init(project=args.task)
     wandb.config.update(args)
     # create results directory if necessary
@@ -136,6 +137,9 @@ parser.add_argument('--mambamil_rate',type=int, default=10, help='mambamil_rate'
 parser.add_argument('--mambamil_layer',type=int, default=2, help='mambamil_layer')
 parser.add_argument('--mambamil_type',type=str, default='SRMamba', choices= ['Mamba', 'BiMamba', 'SRMamba'], help='mambamil_type')
 
+# 允许外部传入 csv 路径
+parser.add_argument('--csv_path', type=str, default=None, help='path to the dataset csv file')
+
 
 args = parser.parse_args()
 device=torch.device("cuda" if torch.cuda.is_available() else "cpu")
@@ -177,10 +181,12 @@ print('\nLoad Dataset')
 
 if args.task == 'LUAD_LUSC':
     args.n_classes=2
-    dataset = Generic_MIL_Dataset(csv_path = 'dataset_csv/LUAD_LUSC.csv',
-                            data_dir= None,
-                            shuffle = False, 
-                            seed = args.seed, 
+    # 灵活读取 CSV
+    csv_to_load = args.csv_path if args.csv_path else 'dataset_csv/LUAD_LUSC.csv'
+    dataset = Generic_MIL_Dataset(csv_path = csv_to_load,
+                            data_dir= args.data_root_dir, # <-- 将 None 改为 args.data_root_dir
+                            shuffle = False,
+                            seed = args.seed,
                             print_info = True,
                             label_dict = {'LUAD':0, 'LUSC':1},
                             patient_strat=False,
@@ -188,16 +194,16 @@ if args.task == 'LUAD_LUSC':
 
 elif args.task == 'BRACS':
     args.n_classes=7
-    dataset = Generic_MIL_Dataset(csv_path = 'dataset_csv/BRACS.csv',
-                            data_dir= None,
-                            shuffle = False, 
-                            seed = args.seed, 
+    csv_to_load = args.csv_path if args.csv_path else 'dataset_csv/BRACS.csv'
+    dataset = Generic_MIL_Dataset(csv_path = csv_to_load,
+                            data_dir= args.data_root_dir, # <-- 将 None 改为 args.data_root_dir
+                            shuffle = False,
+                            seed = args.seed,
                             print_info = True,
                             label_dict = {'PB':0, 'IC':1, 'DCIS':2, 'N':3, 'ADH': 4,
                                           'FEA':5, 'UDH': 6 },
                             patient_strat=False,
                             ignore=[])
-     
 else:
     raise NotImplementedError
     
