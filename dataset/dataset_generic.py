@@ -334,52 +334,61 @@ class Generic_MIL_Dataset(Generic_WSI_Classification_Dataset):
 	def load_from_h5(self, toggle):
 		self.use_h5 = toggle
 
-	def __getitem__(self, idx):
-		slide_id = self.slide_data['slide_id'][idx]
-		label = self.slide_data['label'][idx]
-		if type(self.data_dir) == dict:
-			source = self.slide_data['source'][idx]
-			data_dir = self.data_dir[source]
-		elif self.data_dir is None:
-			data_dir = self.slide_data['dir'][idx]
+
+def __getitem__(self, idx):
+	slide_id = self.slide_data['slide_id'][idx]
+	label = self.slide_data['label'][idx]
+	if type(self.data_dir) == dict:
+		source = self.slide_data['source'][idx]
+		data_dir = self.data_dir[source]
+	elif self.data_dir is None:
+		data_dir = self.slide_data['dir'][idx]
+	else:
+		data_dir = self.data_dir
+
+	if not self.use_h5:
+		if self.patch_size == '512':
+			full_path = os.path.join(data_dir, 'pt_files', self.backbone, '{}.pt'.format(slide_id))
 		else:
-			data_dir = self.data_dir
-		
+			full_path = os.path.join(data_dir, self.patch_size, 'pt_files', self.backbone, '{}.pt'.format(slide_id))
 
-		if not self.use_h5:
-			# patch size 512 is located in the root
-			if self.patch_size == '512':
-				full_path = os.path.join(data_dir, 'pt_files', self.backbone, '{}.pt'.format(slide_id))
-			else:
-				full_path = os.path.join(data_dir, self.patch_size, 'pt_files', self.backbone, '{}.pt'.format(slide_id))
-
-			if full_path in self.data_cache.keys():
-				features = self.data_cache[full_path]
-			else:
-				# print('Loading:', full_path)
-				features = torch.load(full_path)
-				if hasattr(Generic_Split, 'cache_flag') and self.cache_flag:
-					self.data_cache[full_path] = features
-					print(len(self.data_cache.keys()))
-			return features, label
-			
-			# else:
-			# 	return slide_id, label
-
+		if full_path in self.data_cache.keys():
+			features = self.data_cache[full_path]
 		else:
-			full_path = os.path.join(data_dir,'h5_files','{}.h5'.format(slide_id))
-			with h5py.File(full_path,'r') as hdf5_file:
-				features = hdf5_file['features'][:]
-				coords = hdf5_file['coords'][:]
+			features = torch.load(full_path)
+			if hasattr(Generic_Split, 'cache_flag') and self.cache_flag:
+				self.data_cache[full_path] = features
 
-			features = torch.from_numpy(features)
-			return features, label, coords
+		# ==========================================
+		# 🌟 IHG-Mamba 核心创新：Hilbert 2D-1D 空间拓扑重排 (亚型分类版)
+		# ==========================================
+		slide_id_clean = slide_id.replace('.pt', '') if isinstance(slide_id, str) and slide_id.endswith('.pt') else str(
+			slide_id)
+		try:
+			hilbert_dir = os.path.join(os.path.dirname(data_dir), 'hilbert')
+			hilbert_path = os.path.join(hilbert_dir, f"{slide_id_clean}_hilbert.pt")
 
-	def set_backbone(self, backbone):
-		self.backbone = backbone
-	
-	def set_patch_size(self, size):
-		self.patch_size = size
+			if os.path.exists(hilbert_path):
+				hilbert_idx = torch.load(hilbert_path)
+				features = features[hilbert_idx]
+				print(
+					f"\n✅ [亚型分类 - IHG-Mamba] 成功为切片 {slide_id_clean} 应用 Hilbert 排序! 形状: {features.shape}")
+			else:
+				print(f"[Warning] 找不到索引文件 {hilbert_path}，使用无序特征")
+		except Exception as e:
+			print(f"[Warning] Hilbert 排序出错 {slide_id_clean}. 错误: {e}")
+		# ==========================================
+
+		return features, label
+
+	else:
+		full_path = os.path.join(data_dir, 'h5_files', '{}.h5'.format(slide_id))
+		with h5py.File(full_path, 'r') as hdf5_file:
+			features = hdf5_file['features'][:]
+			coords = hdf5_file['coords'][:]
+
+		features = torch.from_numpy(features)
+		return features, label, coords
 
 
 class Generic_Split(Generic_MIL_Dataset):

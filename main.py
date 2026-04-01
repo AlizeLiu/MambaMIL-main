@@ -204,6 +204,25 @@ elif args.task == 'BRACS':
                                           'FEA':5, 'UDH': 6 },
                             patient_strat=False,
                             ignore=[])
+elif args.task == 'toy_cls':
+    args.n_classes = 2  # 假装这是一个二分类任务
+    csv_to_load = args.csv_path if args.csv_path else 'dataset_csv/toy_survival.csv'
+
+    # 🌟 绝招：引入 collections.defaultdict。遇到任何没见过的标签（如 25.6），都默认返回类别 0
+    import collections
+
+    dummy_dict = collections.defaultdict(lambda: 0)
+
+    dataset = Generic_MIL_Dataset(csv_path=csv_to_load,
+                                  data_dir=args.data_root_dir,
+                                  shuffle=False,
+                                  seed=args.seed,
+                                  print_info=True,
+                                  label_dict=dummy_dict,  # <--- 使用我们的万能伪装字典
+                                  patient_strat=False,
+                                  ignore=[],
+                                  label_col='survival_months')
+
 else:
     raise NotImplementedError
     
