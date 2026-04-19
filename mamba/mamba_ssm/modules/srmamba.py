@@ -305,7 +305,7 @@ class SRMamba(nn.Module):
                 ssm_state.copy_(last_state)
             y = rearrange(y, "b d l -> b l d")
             y_b = rearrange(y_b, "b d l -> b l d")
-            out = self.out_proj(y_b + y_f)
+            out = self.out_proj(y_b + y)
         return out
 
     def step(self, hidden_states, conv_state, ssm_state):
