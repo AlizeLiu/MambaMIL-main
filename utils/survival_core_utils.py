@@ -61,14 +61,14 @@ class EarlyStopping:
         self.val_loss_min = val_loss
 
 class EarlyStopping_cindex:
-    """Early stops the training if validation loss doesn't improve after a given patience."""
+    """Early stops the training if validation C-index doesn't improve after a given patience."""
     def __init__(self, warmup=5, patience=15, stop_epoch=20, verbose=False):
         """
         Args:
-            patience (int): How long to wait after last time validation loss improved.
+            patience (int): How long to wait after last time validation C-index improved.
                             Default: 20
             stop_epoch (int): Earliest epoch possible for stopping
-            verbose (bool): If True, prints a message for each validation loss improvement. 
+            verbose (bool): If True, prints a message for each validation C-index improvement. 
                             Default: False
         """
         self.warmup = warmup
@@ -80,16 +80,15 @@ class EarlyStopping_cindex:
         self.early_stop = False
         self.val_loss_min = np.Inf
 
-    def __call__(self, epoch, val_loss, model, ckpt_name = 'checkpoint.pt'):
+    def __call__(self, epoch, val_cindex, model, ckpt_name = 'checkpoint.pt'):
 
-        score = val_loss
-        # score = -val_loss
+        score = val_cindex
 
         if epoch < self.warmup:
             pass
         elif self.best_score is None:
             self.best_score = score
-            self.save_checkpoint(val_loss, model, ckpt_name)
+            self.save_checkpoint(val_cindex, model, ckpt_name)
         elif score <= self.best_score:
             self.counter += 1
             print(f'EarlyStopping counter: {self.counter} out of {self.patience}')
@@ -97,15 +96,15 @@ class EarlyStopping_cindex:
                 self.early_stop = True
         else:
             self.best_score = score
-            self.save_checkpoint(val_loss, model, ckpt_name)
+            self.save_checkpoint(val_cindex, model, ckpt_name)
             self.counter = 0
 
-    def save_checkpoint(self, val_loss, model, ckpt_name):
-        '''Saves model when validation loss decrease.'''
+    def save_checkpoint(self, val_cindex, model, ckpt_name):
+        '''Saves model when validation C-index improves.'''
         if self.verbose:
-            print(f'Validation loss decreased ({self.val_loss_min:.6f} --> {val_loss:.6f}).  Saving model ...')
+            print(f'Validation C-index improved ({self.val_loss_min:.6f} --> {val_cindex:.6f}).  Saving model ...')
         torch.save(model.state_dict(), ckpt_name)
-        self.val_loss_min = val_loss
+        self.val_loss_min = val_cindex
 
 
 
@@ -232,17 +231,21 @@ def train(datasets: tuple, cur: int, args: Namespace):
     print('Done!')
     
     print('\nInit Loaders...', end=' ')
+    # 设置训练/验证采样模式
+    train_split.training_mode = True   # 训练：随机采样（instance-level augmentation）
+    val_split.training_mode = False    # 验证：固定采样（评估一致性）
     train_loader = get_split_loader(train_split, training=True, testing = args.testing, 
         weighted = args.weighted_sample, mode=args.mode, batch_size=args.batch_size)
     val_loader = get_split_loader(val_split, testing = args.testing, mode=args.mode, batch_size=args.batch_size)
     if not args.k_fold:
+        test_split.training_mode = False  # 测试：固定采样
         test_loader = get_split_loader(test_split, testing = args.testing, mode=args.mode, batch_size=args.batch_size)
     print('Done!')
 
     print('\nSetup EarlyStopping...', end=' ')
     if args.early_stopping:
         if args.k_fold:
-            early_stopping = EarlyStopping_cindex(warmup=0, patience=20, stop_epoch=40, verbose = True)
+            early_stopping = EarlyStopping_cindex(warmup=0, patience=5, stop_epoch=5, verbose = True)
         else:
             early_stopping = EarlyStopping(warmup=0, patience=20, stop_epoch=40, verbose = True)
     else:
@@ -269,9 +272,9 @@ def train(datasets: tuple, cur: int, args: Namespace):
     if (not args.k_fold):
         results_dict, test_cindex = summary_survival(model, test_loader, args.n_classes)
         print('Test c-Index: {:.4f}'.format(test_cindex))
-        writer.close()
+        if writer: writer.close()
         return results_dict, test_cindex, val_cindex
-    writer.close()
+    if writer: writer.close()
     return val_cindex
 
 def train_loop_survival(epoch, model, loader, optimizer, n_classes, writer=None, loss_fn=None, reg_fn=None, lambda_reg=0., gc=16):   
@@ -287,15 +290,12 @@ def train_loop_survival(epoch, model, loader, optimizer, n_classes, writer=None,
     for batch_idx, batch in enumerate(loader):
         
 
-
         data_WSI, data_omic, label, event_time, c = batch
         data_WSI, data_omic = data_WSI.to(device, non_blocking = True), data_omic.to(device, non_blocking = True)
         label = label.to(device, non_blocking = True)
         c = c.to(device, non_blocking=True)
-        # hazards, S, Y_hat, _, _ = model(x_path=data_WSI, x_omic=data_omic) # return hazards, S, Y_hat, A_raw, results_dict
+
         hazards, S, Y_hat, _, _ = model(data_WSI)
-        # hazards = torch.sigmoid(hazards)
-        # S = torch.cumprod(1 - hazards, dim=1)
         loss = loss_fn(hazards=hazards, S=S, Y=label, c=c)
         loss_value = loss.item()
 
@@ -312,11 +312,11 @@ def train_loop_survival(epoch, model, loader, optimizer, n_classes, writer=None,
         train_loss_surv += loss_value
         train_loss += loss_value + loss_reg
 
-        if (batch_idx + 1) % 100 == 0:
+        if (batch_idx + 1) % 50 == 0:
             print('batch {}, loss: {:.4f}, label: {}, event_time: {:.4f}, risk: {:.4f}, bag_size: {}'.format(batch_idx, loss_value + loss_reg, label.item(), float(event_time), float(risk), data_WSI.size(0)))
         # backward pass
-        loss = loss / gc + loss_reg
-        loss.backward()
+        loss_scaled = loss / gc + loss_reg
+        loss_scaled.backward()
 
         if (batch_idx + 1) % gc == 0: 
             optimizer.step()
@@ -351,10 +351,7 @@ def validate_survival(cur, epoch, model, loader, n_classes, early_stopping=None,
         c = c.to(device)
 
         with torch.no_grad():
-            # hazards, S, Y_hat, _, _ = model(x_path=data_WSI, x_omic=data_omic) # return hazards, S, Y_hat, A_raw, results_dict
-            hazards, S, Y_hat, _, _ = model(data_WSI) # return hazards, S, Y_hat, A_raw, results_dict
-            # hazards = torch.sigmoid(hazards)
-            # S = torch.cumprod(1 - hazards, dim=1)
+            hazards, S, Y_hat, _, _ = model(data_WSI)
         loss = loss_fn(hazards=hazards, S=S, Y=label, c=c, alpha=0)
         loss_value = loss.item()
 
@@ -413,7 +410,6 @@ def summary_survival(model, loader, n_classes):
         slide_id = slide_ids.iloc[batch_idx]
 
         with torch.no_grad():
-            # hazards, survival, Y_hat, _, _ = model(x_path=data_WSI, x_omic=data_omic)
             hazards, survival, Y_hat, _, _ = model(data_WSI)
             # hazards = torch.sigmoid(hazards)
             # S = torch.cumprod(1 - hazards, dim=1)

@@ -359,6 +359,7 @@ class Generic_MIL_Survival_Dataset(Generic_WSI_Survival_Dataset):
         self.data_dir = data_dir
         self.mode = mode
         self.use_h5 = False
+        self.training_mode = True  # 默认训练模式
 
     def load_from_h5(self, toggle):
         self.use_h5 = toggle
@@ -394,19 +395,33 @@ class Generic_MIL_Survival_Dataset(Generic_WSI_Survival_Dataset):
                         # =========================================================
                         # 🌟 IHG-Mamba: Hilbert 空间拓扑重排 (精准路径对齐)
                         # =========================================================
-                        # 精准指向你上一层生成的 hilbert 文件夹
                         hilbert_path = os.path.join(data_dir, 'hilbert', f'{slide_id_clean}_hilbert.pt')
 
                         try:
                             if os.path.exists(hilbert_path):
                                 hilbert_idx = torch.load(hilbert_path)
                                 wsi_bag = wsi_bag[hilbert_idx]  # 【核心：特征重排】
-                                print(f"\n✅ [IHG-Mamba 核心启动] 成功为切片 {slide_id_clean} 应用 Hilbert 2D-1D 空间拓扑重排！张量形状: {wsi_bag.shape}")
+                                print(f"\n✅ [IHG-Mamba] Hilbert 重排 {slide_id_clean}: {wsi_bag.shape}")
 
                             else:
                                 print(f"[Warning] 找不到索引文件 {hilbert_path}，使用无序特征")
                         except Exception as e:
                             print(f"[Warning] Hilbert index issue for {slide_id_clean}. Error: {e}")
+
+                        # ===== 防 OOM: 限制最大序列长度 =====
+                        MAX_SEQ_LEN = 2500
+                        if wsi_bag.shape[0] > MAX_SEQ_LEN:
+                            orig_len = wsi_bag.shape[0]
+                            if self.training_mode:
+                                # 训练模式：随机采样（每 epoch 不同，instance-level augmentation）
+                                indices = torch.randperm(orig_len)[:MAX_SEQ_LEN]
+                                indices, _ = indices.sort()
+                            else:
+                                # 验证模式：均匀降采样（固定，保证评估一致性）
+                                step = orig_len / MAX_SEQ_LEN
+                                indices = torch.arange(0, orig_len, step).long()[:MAX_SEQ_LEN]
+                            wsi_bag = wsi_bag[indices]
+                            print(f"[Subsample] {slide_id_clean}: {orig_len} -> {wsi_bag.shape[0]}")
                         # =========================================================
 
                         path_features.append(wsi_bag)
@@ -427,6 +442,7 @@ class Generic_MIL_Survival_Dataset(Generic_WSI_Survival_Dataset):
 class Generic_Split(Generic_MIL_Survival_Dataset):
     def __init__(self, slide_data, metadata, mode, signatures=None, data_dir=None, label_col=None, patient_dict=None, num_classes=2):
         self.use_h5 = False
+        self.training_mode = True  # 默认训练模式，外部可切换
         self.slide_data = slide_data
         self.metadata = metadata
         self.mode = mode

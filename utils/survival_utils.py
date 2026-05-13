@@ -87,7 +87,7 @@ def get_split_loader(split_dataset, training = False, testing = False, weighted 
     else:
         collate = collate_MIL_survival
 
-    kwargs = {'num_workers': 4} if device.type == "cuda" else {}
+    kwargs = {'num_workers': 4, 'pin_memory': True, 'prefetch_factor': 2} if device.type == "cuda" else {}
     if not testing:
         if training:
             if weighted:
@@ -132,7 +132,6 @@ def generate_split(cls_ids, val_num, test_num, samples, n_splits = 5,
     seed = 7, label_frac = 1.0, custom_test_ids = None):
     indices = np.arange(samples).astype(int)
     
-    pdb.set_trace()
     if custom_test_ids is not None:
         indices = np.setdiff1d(indices, custom_test_ids)
 

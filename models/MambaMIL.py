@@ -23,10 +23,9 @@ def initialize_weights(module):
 
 
 class MambaMIL(nn.Module):
-    # 我们在 __init__ 中增加了一个 pool_size 参数，默认 100 倍压缩
-    def __init__(self, in_dim, n_classes, dropout, act, survival=False, layer=2, rate=10, type="SRMamba", pool_size=100):
+    def __init__(self, in_dim, n_classes, dropout, act, survival=False, layer=1, rate=10, type="SRMamba", pool_size=100):
         super(MambaMIL, self).__init__()
-        self._fc1 = [nn.Linear(in_dim, 512)]
+        self._fc1 = [nn.Linear(in_dim, 256)]
         if act.lower() == 'relu':
             self._fc1 += [nn.ReLU()]
         elif act.lower() == 'gelu':
@@ -35,25 +34,24 @@ class MambaMIL(nn.Module):
             self._fc1 += [nn.Dropout(dropout)]
 
         self._fc1 = nn.Sequential(*self._fc1)
-        self.norm = nn.LayerNorm(512)
+        self.norm = nn.LayerNorm(256)
 
         self.survival = survival
         self.rate = rate
         self.type = type
 
         # ===== 2. 构建层级 Mamba 骨架 =====
-        # 为了代码优雅，我写了一个内部方法来生成 Mamba 层
-        # 你的模型现在拥有两条独立的 Mamba 链路：局部(微观) 和 全局(宏观)
-        self.local_layers = self._build_mamba_layers(layer, type)
-        self.global_layers = self._build_mamba_layers(layer, type)
+        # 轻量化：Local=1层, Global=1层，减少参数量防止过拟合
+        self.local_layers = self._build_mamba_layers(1, type)
+        self.global_layers = self._build_mamba_layers(1, type)
 
         # ===== 3. 插入各向异性拓扑池化 =====
-        self.atp_pool = ATPPool(dim=512, pool_size=pool_size)
+        self.atp_pool = ATPPool(dim=256, pool_size=pool_size)
 
         self.n_classes = n_classes
-        self.classifier = nn.Linear(512, self.n_classes)
+        self.classifier = nn.Linear(256, self.n_classes)
         self.attention = nn.Sequential(
-            nn.Linear(512, 128),
+            nn.Linear(256, 128),
             nn.Tanh(),
             nn.Linear(128, 1)
         )
@@ -65,15 +63,14 @@ class MambaMIL(nn.Module):
         layers = nn.ModuleList()
         for _ in range(layer_num):
             if mamba_type == "SRMamba":
-                # 加入 use_fast_path=False 强制使用纯 PyTorch 降级实现
-                layers.append(nn.Sequential(nn.LayerNorm(512),
-                                            SRMamba(d_model=512, d_state=16, d_conv=4, expand=2, use_fast_path=False)))
+                layers.append(nn.Sequential(nn.LayerNorm(256),
+                                            SRMamba(d_model=256, d_state=16, d_conv=4, expand=2, use_fast_path=True)))
             elif mamba_type == "Mamba":
-                layers.append(nn.Sequential(nn.LayerNorm(512),
-                                            Mamba(d_model=512, d_state=16, d_conv=4, expand=2, use_fast_path=False)))
+                layers.append(nn.Sequential(nn.LayerNorm(256),
+                                            Mamba(d_model=256, d_state=16, d_conv=4, expand=2, use_fast_path=True)))
             elif mamba_type == "BiMamba":
-                layers.append(nn.Sequential(nn.LayerNorm(512),
-                                            BiMamba(d_model=512, d_state=16, d_conv=4, expand=2, use_fast_path=False)))
+                layers.append(nn.Sequential(nn.LayerNorm(256),
+                                            BiMamba(d_model=256, d_state=16, d_conv=4, expand=2, use_fast_path=True)))
             else:
                 raise NotImplementedError("Mamba [{}] is not implemented".format(mamba_type))
         return layers
@@ -83,7 +80,7 @@ class MambaMIL(nn.Module):
             x = x.expand(1, -1, -1)
         h = x.float()  # [B, N, in_dim]
 
-        h = self._fc1(h)  # [B, N, 512] (N 约等于 10000+)
+        h = self._fc1(h)  # [B, N, 256] (N 约等于 5000+)
 
         # ===== 阶段 1: 微观环境建模 (Local Mamba) =====
         for layer in self.local_layers:
@@ -92,12 +89,13 @@ class MambaMIL(nn.Module):
             if self.type == "SRMamba":
                 h = layer[1](layer[0](h), rate=self.rate)
             else:
+
                 h = layer[1](layer[0](h))
             h = h + h_
 
         # ===== 阶段 2: 边界保留降维 (ATP-Pool) =====
         # 将微观特征通过各向异性扩散，压缩成宏观特征
-        h = self.atp_pool(h) # 长度瞬间缩小: [B, N // pool_size, 512]
+        h = self.atp_pool(h) # 长度瞬间缩小: [B, N // pool_size, 256]
 
         # ===== 阶段 3: 宏观组织建模 (Global Mamba) =====
         for layer in self.global_layers:
@@ -113,8 +111,8 @@ class MambaMIL(nn.Module):
         A = self.attention(h) # [B, M, 1] (M = N // pool_size)
         A = torch.transpose(A, 1, 2)
         A = F.softmax(A, dim=-1) # [B, 1, M]
-        h = torch.bmm(A, h) # [B, 1, 512]
-        h = h.squeeze(0)    # [B, 512]
+        h = torch.bmm(A, h) # [B, 1, 256]
+        h = h.squeeze(0)    # [B, 256]
 
         # ===== 阶段 5: 下游任务预测 =====
         logits = self.classifier(h)  # [B, n_classes]

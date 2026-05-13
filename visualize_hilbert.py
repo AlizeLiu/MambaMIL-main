@@ -50,7 +50,7 @@ def print_quantitative_metrics(dist_default, dist_hilbert, tear_threshold):
             print(f"{k:<40} | {int(v[0]):>10} | {int(v[1]):>10}")
     print("=" * 65)
     print(
-        f"IHG-Mamba 将空间撕裂率从 {metrics['Tear Rate (%)'][0]:.2f}% 降至 {metrics['Tear Rate (%)'][1]:.2f}%！\n")
+        f"IHG-Mamba 将空间撕裂率从 {metrics['Tear Rate (%)'][0]:.2f}% 降低至 {metrics['Tear Rate (%)'][1]:.2f}%\n")
 
     return metrics
 
@@ -156,7 +156,7 @@ def aesthetic_quantify_visualize_v3(h5_path, hilbert_pt_path, save_traj="aesthet
 
 if __name__ == "__main__":
 
-    H5_FILE = r"J:\Work\CLAM-master\toy_test\patches\macenko_demo_1.h5"
-    HILBERT_PT = r"J:\Work\CLAM-master\toy_test\hilbert\macenko_demo_1_hilbert.pt"
+    H5_FILE = r"/home/a255372639/TCGA-LUAD/LUAD_example/patches/TCGA-05-4422-01Z-00-DX1.4802093f-71ea-43d5-bd92-b4bd7fc8c5bf.h5"
+    HILBERT_PT = r"/home/a255372639/TCGA-LUAD/LUAD_0506/LUAD_hilbert/TCGA-05-4422-01Z-00-DX1.4802093f-71ea-43d5-bd92-b4bd7fc8c5bf_hilbert.pt"
 
     aesthetic_quantify_visualize_v3(H5_FILE, HILBERT_PT)

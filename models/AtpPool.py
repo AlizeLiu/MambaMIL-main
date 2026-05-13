@@ -9,7 +9,7 @@ class ATPPool(nn.Module):
     基于 Hilbert 流形的各向异性拓扑池化
     """
 
-    def __init__(self, dim, pool_size=100, K_init=1.0, diffusion_steps=1, dt=0.1):
+    def __init__(self, dim, pool_size=100, K_init=1.0, diffusion_steps=2, dt=0.1):
         super(ATPPool, self).__init__()
         self.pool_size = pool_size
         self.diffusion_steps = diffusion_steps

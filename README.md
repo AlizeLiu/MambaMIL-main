@@ -42,7 +42,7 @@
 * Install Mamba
 ```shell
 > git clone git@github.com:isyangshu/MambaMIL.git
-> cd mamba
+> cd mamba——back
 > pip install .
 ```
 * Other requirements

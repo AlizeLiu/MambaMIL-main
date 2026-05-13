@@ -43,7 +43,7 @@ def main(args):
     for i in folds:
         start = timer()
         seed_torch(args.seed)
-        results_pkl_path = os.path.join(args.results_dir, 'split_latest_val_{}_results.pkl'.format(i))
+        results_pkl_path = os.path.join(args.results_dir, 'split_{}_results.pkl'.format(i))
         if os.path.isfile(results_pkl_path):
             print("Skipping Split %d" % i)
             continue
