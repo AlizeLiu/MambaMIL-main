@@ -38,7 +38,7 @@ class MambaMIL(nn.Module):
         pool_size=100,
         use_atp_pool=True,
         diffusion_steps=2,
-        K_init=1.0,
+        K_init=0.5,
         atp_dt=0.1,
     ):
         super(MambaMIL, self).__init__()

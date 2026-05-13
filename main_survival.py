@@ -209,7 +209,7 @@ parser.add_argument('--global_layers', type=int, default=1,
 parser.add_argument('--diffusion_steps', type=int, default=2,
                     help='number of anisotropic diffusion steps in ATP-Pool')
 
-parser.add_argument('--K_init', type=float, default=1.0,
+parser.add_argument('--K_init', type=float, default=0.5,
                     help='initial boundary conductance threshold K in ATP-Pool')
 
 parser.add_argument('--atp_dt', type=float, default=0.1,

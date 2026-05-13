@@ -281,9 +281,38 @@ def train(datasets: tuple, cur: int, args: Namespace):
     print('Done!')
 
     for epoch in range(args.max_epochs):
+        # ATP 诊断：仅在 epoch 0 启用，记录前 200 个 batch 的扩散统计量
+        if epoch == 0 and hasattr(model, 'atp_pool') and hasattr(model.atp_pool, 'enable_diagnosis'):
+            model.atp_pool.enable_diagnosis(max_steps=200)
+
         if args.task_type == 'survival':
             train_loop_survival(epoch, model, train_loader, optimizer, args.n_classes, writer, loss_fn, reg_fn, args.lambda_reg, args.gc)
             stop = validate_survival(cur, epoch, model, val_loader, args.n_classes, early_stopping, monitor_cindex, writer, loss_fn, reg_fn, args.lambda_reg, args.results_dir, args.k_fold)
+
+        # ATP 诊断：epoch 0 结束后打印汇总
+        if epoch == 0 and hasattr(model, 'atp_pool') and hasattr(model.atp_pool, 'get_diagnosis_summary'):
+            summary = model.atp_pool.get_diagnosis_summary()
+            if summary:
+                print('\n' + '=' * 60)
+                print('ATP-Pool 扩散诊断 (epoch 0, 前 200 batches)')
+                print('=' * 60)
+                for metric, stats in summary.items():
+                    print(f'  {metric}:')
+                    print(f'    mean={stats["mean"]:.6f}  median={stats["median"]:.6f}  '
+                          f'p10={stats["p10"]:.6f}  p90={stats["p90"]:.6f}  '
+                          f'min={stats["min"]:.6f}  max={stats["max"]:.6f}')
+                # 健康检查
+                c_mean = summary.get('c_mean', {}).get('mean', 0)
+                c_gt09 = summary.get('ratio_c_gt_09', {}).get('mean', 0)
+                c_lt01 = summary.get('ratio_c_lt_01', {}).get('mean', 0)
+                if c_gt09 > 0.8:
+                    print(f'  ⚠️  c>0.9 比例 {c_gt09:.1%}，过度平滑，建议降低 K_init (当前={model.atp_pool.K.item():.4f})')
+                elif c_lt01 > 0.5:
+                    print(f'  ⚠️  c<0.1 比例 {c_lt01:.1%}，扩散退化，建议升高 K_init (当前={model.atp_pool.K.item():.4f})')
+                else:
+                    print(f'  ✅ 扩散分布合理 (c_mean={c_mean:.4f}, K={model.atp_pool.K.item():.4f})')
+                print('=' * 60 + '\n')
+            model.atp_pool.disable_diagnosis()
 
         if stop:
             break
