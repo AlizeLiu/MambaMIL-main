@@ -14,8 +14,8 @@ class ATPPool(nn.Module):
         self.pool_size = pool_size
         self.diffusion_steps = diffusion_steps
 
-        #  K 设为可学习参数 (Learnable Parameter)
-        self.K = nn.Parameter(torch.tensor(K_init))
+        # K 设为可学习参数 (Learnable Parameter)
+        self.K = nn.Parameter(torch.tensor(float(K_init)))
 
         # 扩散时间步长 (控制每次融合的力度)
         self.dt = dt
@@ -34,16 +34,17 @@ class ATPPool(nn.Module):
             grad_left = torch.zeros_like(x)
             grad_left[:, 1:, :] = x[:, :-1, :] - x[:, 1:, :]
 
-            # 2. 计算边界传导系数 (Boundary Conductivity Coefficients)
             # 计算梯度的 L2 范数平方 (表示局部异质性剧烈程度)
             norm_right_sq = torch.sum(grad_right ** 2, dim=-1, keepdim=True)
             norm_left_sq = torch.sum(grad_left ** 2, dim=-1, keepdim=True)
 
             # c = exp(-(|nabla X|^2) / K^2)
-            c_right = torch.exp(-norm_right_sq / (self.K ** 2 + 1e-6))
-            c_left = torch.exp(-norm_left_sq / (self.K ** 2 + 1e-6))
+            # 防止 K 变成不稳定值
+            K = torch.clamp(self.K, min=1e-3)
+            c_right = torch.exp(-norm_right_sq / (K ** 2 + 1e-6))
+            c_left = torch.exp(-norm_left_sq / (K ** 2 + 1e-6))
 
-            # 3. 执行流形扩散更新 (Manifold Diffusion Update)
+            # 执行流形扩散更新 (Manifold Diffusion Update)
             x = x + self.dt * (c_right * grad_right + c_left * grad_left)
 
         return x
@@ -60,17 +61,26 @@ class ATPPool(nn.Module):
         x_diffused = self._perona_malik_diffusion_1d(x)
 
         # 步骤 2：拓扑安全降采样 (Topological Downsampling)
-        # shape 转换为 (B, D, L)
-        x_diffused = x_diffused.transpose(1, 2)
+        # 处理长度不能被 pool_size 整除的情况
+        pad_len = (self.pool_size - L % self.pool_size) % self.pool_size
 
-        # 使用 1D 均值池化进行暴力压缩，池化窗口大小为 pool_size
-        pooled_x = F.avg_pool1d(x_diffused, kernel_size=self.pool_size, stride=self.pool_size)
+        if pad_len > 0:
+            x_diffused = x_diffused.transpose(1, 2)
+            x_diffused = F.pad(x_diffused, (0, pad_len), mode='replicate')
+        else:
+            x_diffused = x_diffused.transpose(1, 2)
+
+        # 使用 1D 均值池化进行压缩，池化窗口大小为 pool_size
+        pooled_x = F.avg_pool1d(
+            x_diffused,
+            kernel_size=self.pool_size,
+            stride=self.pool_size
+        )
 
         # 转回原始 shape: (B, M, D)
         pooled_x = pooled_x.transpose(1, 2)
 
         return pooled_x
-
 
 
 if __name__ == "__main__":

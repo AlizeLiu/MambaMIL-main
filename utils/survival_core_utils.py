@@ -213,7 +213,24 @@ def train(datasets: tuple, cur: int, args: Namespace):
         model = S4Model(in_dim = args.in_dim, n_classes = args.n_classes, act = 'gelu', dropout = args.drop_out, survival = True)
     elif args.model_type == 'mamba_mil':
         from models.MambaMIL import MambaMIL
-        model = MambaMIL(in_dim = args.in_dim, n_classes=args.n_classes, dropout=args.drop_out, act='gelu', survival = True, layer = args.mambamil_layer, rate = args.mambamil_rate, type = args.mambamil_type)
+        model = MambaMIL(
+            in_dim=args.in_dim,
+            n_classes=args.n_classes,
+            dropout=args.drop_out,
+            act='gelu',
+            survival=True,
+            layer=args.mambamil_layer,
+            rate=args.mambamil_rate,
+            type=args.mambamil_type,
+            hidden_dim=args.hidden_dim,
+            local_layers=args.local_layers,
+            global_layers=args.global_layers,
+            pool_size=args.pool_size,
+            use_atp_pool=args.use_atp_pool,
+            diffusion_steps=args.diffusion_steps,
+            K_init=args.K_init,
+            atp_dt=args.atp_dt,
+        )
     
     else:
         raise NotImplementedError(f'{args.model_type} is not implemented ...')
@@ -231,6 +248,14 @@ def train(datasets: tuple, cur: int, args: Namespace):
     print('Done!')
     
     print('\nInit Loaders...', end=' ')
+    # 设置数据集参数
+    for split in [train_split, val_split] if args.k_fold else [train_split, val_split, test_split]:
+        split.max_seq_len = args.max_seq_len
+        split.use_hilbert_index = args.use_hilbert_index
+        split.features_already_hilbert = args.features_already_hilbert
+        split.use_random_sampling = args.use_random_sampling
+        split.num_eval_views = args.num_eval_views
+    
     # 设置训练/验证采样模式
     train_split.training_mode = True   # 训练：随机采样（instance-level augmentation）
     val_split.training_mode = False    # 验证：固定采样（评估一致性）
@@ -245,7 +270,7 @@ def train(datasets: tuple, cur: int, args: Namespace):
     print('\nSetup EarlyStopping...', end=' ')
     if args.early_stopping:
         if args.k_fold:
-            early_stopping = EarlyStopping_cindex(warmup=0, patience=5, stop_epoch=5, verbose = True)
+            early_stopping = EarlyStopping_cindex(warmup=args.es_warmup, patience=args.es_patience, stop_epoch=args.es_stop_epoch, verbose=True)
         else:
             early_stopping = EarlyStopping(warmup=0, patience=20, stop_epoch=40, verbose = True)
     else:

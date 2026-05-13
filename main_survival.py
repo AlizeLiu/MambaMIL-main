@@ -176,7 +176,7 @@ parser.add_argument('--backbone', type=str, default='resnet50')
 parser.add_argument('--patch_size', type=str, default='')
 parser.add_argument('--preloading', type=str, default='no')
 parser.add_argument('--in_dim', type=int, default=1024)
-parser.add_argument('--k_fold', type=bool, default=False, help='k fold for cross validation')
+parser.add_argument('--k_fold', action='store_true', default=False, help='use k-fold cross validation')
 
 
 ## mambamil
@@ -187,7 +187,64 @@ parser.add_argument('--mambamil_type',type=str, default='SRMamba', choices= ['Ma
 
 parser.add_argument('--csv_path', type=str, default=None, help='path to the dataset csv file')
 
+## IHG-Mamba architecture params
+
+parser.add_argument('--hidden_dim', type=int, default=256,
+                    help='hidden dimension for IHG-Mamba')
+
+parser.add_argument('--max_seq_len', type=int, default=2500,
+                    help='maximum number of patches per WSI; <=0 means no truncation')
+
+parser.add_argument('--pool_size', type=int, default=100,
+                    help='pooling window size for ATP-Pool')
+
+parser.add_argument('--local_layers', type=int, default=1,
+                    help='number of local Mamba layers')
+
+parser.add_argument('--global_layers', type=int, default=1,
+                    help='number of global Mamba layers')
+
+parser.add_argument('--diffusion_steps', type=int, default=2,
+                    help='number of anisotropic diffusion steps in ATP-Pool')
+
+parser.add_argument('--K_init', type=float, default=1.0,
+                    help='initial boundary conductance threshold K in ATP-Pool')
+
+parser.add_argument('--atp_dt', type=float, default=0.1,
+                    help='diffusion step size in ATP-Pool')
+
+parser.add_argument('--disable_atp_pool', action='store_true', default=False,
+                    help='disable ATP-Pool for ablation')
+
+parser.add_argument('--features_already_hilbert', action='store_true', default=True,
+                    help='whether input .pt features are already Hilbert ordered')
+
+parser.add_argument('--use_hilbert_index', action='store_true', default=False,
+                    help='load hilbert/*.pt index and reorder features inside DataLoader')
+
+parser.add_argument('--disable_random_sampling', action='store_true', default=False,
+                    help='disable random sampling and use deterministic sampling')
+
+parser.add_argument('--num_eval_views', type=int, default=1,
+                    help='number of evaluation views for multiview risk averaging')
+
+## Early stopping params
+
+parser.add_argument('--es_warmup', type=int, default=0,
+                    help='early stopping warmup epochs')
+
+parser.add_argument('--es_patience', type=int, default=10,
+                    help='early stopping patience')
+
+parser.add_argument('--es_stop_epoch', type=int, default=10,
+                    help='earliest epoch possible for stopping')
+
+
 args = parser.parse_args()
+
+# 计算派生参数
+args.use_atp_pool = not args.disable_atp_pool
+args.use_random_sampling = not args.disable_random_sampling
 
 device=torch.device("cuda" if torch.cuda.is_available() else "cpu")
 print('Deviece is:', device)

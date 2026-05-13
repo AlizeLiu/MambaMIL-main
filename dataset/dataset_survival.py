@@ -354,12 +354,20 @@ class Generic_WSI_Survival_Dataset(Dataset):
 
 
 class Generic_MIL_Survival_Dataset(Generic_WSI_Survival_Dataset):
-    def __init__(self, data_dir, mode: str = 'omic', **kwargs):
+    def __init__(self, data_dir, mode: str = 'omic', 
+                 max_seq_len=2500, use_hilbert_index=False, features_already_hilbert=True,
+                 use_random_sampling=True, num_eval_views=1, **kwargs):
         super(Generic_MIL_Survival_Dataset, self).__init__(**kwargs)
         self.data_dir = data_dir
         self.mode = mode
         self.use_h5 = False
         self.training_mode = True  # 默认训练模式
+        # IHG-Mamba 参数化
+        self.max_seq_len = max_seq_len
+        self.use_hilbert_index = use_hilbert_index
+        self.features_already_hilbert = features_already_hilbert
+        self.use_random_sampling = use_random_sampling
+        self.num_eval_views = num_eval_views
 
     def load_from_h5(self, toggle):
         self.use_h5 = toggle
@@ -383,7 +391,7 @@ class Generic_MIL_Survival_Dataset(Generic_WSI_Survival_Dataset):
                     path_features = []
                     for slide_id in slide_ids:
                         # 1. 精准指向特征文件 (强制读取 pt_files 文件夹)
-                        slide_id_clean = slide_id.rstrip('.svs')
+                        slide_id_clean = os.path.splitext(slide_id)[0]
                         wsi_path = os.path.join(data_dir, 'pt_files', f'{slide_id_clean}.pt')
 
                         if not os.path.exists(wsi_path):
@@ -393,36 +401,43 @@ class Generic_MIL_Survival_Dataset(Generic_WSI_Survival_Dataset):
                         wsi_bag = torch.load(wsi_path)
 
                         # =========================================================
-                        # 🌟 IHG-Mamba: Hilbert 空间拓扑重排 (精准路径对齐)
+                        # IHG-Mamba: Hilbert 空间拓扑重排 (条件加载)
                         # =========================================================
-                        hilbert_path = os.path.join(data_dir, 'hilbert', f'{slide_id_clean}_hilbert.pt')
+                        # 只有当 features_already_hilbert=False 且 use_hilbert_index=True 时才重排
+                        if self.use_hilbert_index and not self.features_already_hilbert:
+                            hilbert_path = os.path.join(data_dir, 'hilbert', f'{slide_id_clean}_hilbert.pt')
 
-                        try:
-                            if os.path.exists(hilbert_path):
-                                hilbert_idx = torch.load(hilbert_path)
-                                wsi_bag = wsi_bag[hilbert_idx]  # 【核心：特征重排】
-                                print(f"\n✅ [IHG-Mamba] Hilbert 重排 {slide_id_clean}: {wsi_bag.shape}")
+                            if not os.path.exists(hilbert_path):
+                                raise FileNotFoundError(f"Missing Hilbert index: {hilbert_path}")
 
-                            else:
-                                print(f"[Warning] 找不到索引文件 {hilbert_path}，使用无序特征")
-                        except Exception as e:
-                            print(f"[Warning] Hilbert index issue for {slide_id_clean}. Error: {e}")
+                            hilbert_idx = torch.load(hilbert_path).long()
+
+                            if hilbert_idx.numel() != wsi_bag.shape[0]:
+                                raise RuntimeError(
+                                    f"Hilbert index length mismatch for {slide_id_clean}: "
+                                    f"idx={hilbert_idx.numel()}, feature={wsi_bag.shape[0]}"
+                                )
+
+                            wsi_bag = wsi_bag[hilbert_idx]
+                            print(f"\n✅ [IHG-Mamba] Hilbert 重排 {slide_id_clean}: {wsi_bag.shape}")
 
                         # ===== 防 OOM: 限制最大序列长度 =====
-                        MAX_SEQ_LEN = 2500
-                        if wsi_bag.shape[0] > MAX_SEQ_LEN:
+                        max_seq_len = getattr(self, 'max_seq_len', 2500)
+                        use_random_sampling = getattr(self, 'use_random_sampling', True)
+
+                        if max_seq_len is not None and max_seq_len > 0 and wsi_bag.shape[0] > max_seq_len:
                             orig_len = wsi_bag.shape[0]
-                            if self.training_mode:
+
+                            if self.training_mode and use_random_sampling:
                                 # 训练模式：随机采样（每 epoch 不同，instance-level augmentation）
-                                indices = torch.randperm(orig_len)[:MAX_SEQ_LEN]
+                                indices = torch.randperm(orig_len)[:max_seq_len]
                                 indices, _ = indices.sort()
                             else:
                                 # 验证模式：均匀降采样（固定，保证评估一致性）
-                                step = orig_len / MAX_SEQ_LEN
-                                indices = torch.arange(0, orig_len, step).long()[:MAX_SEQ_LEN]
+                                indices = torch.linspace(0, orig_len - 1, max_seq_len).long()
+
                             wsi_bag = wsi_bag[indices]
                             print(f"[Subsample] {slide_id_clean}: {orig_len} -> {wsi_bag.shape[0]}")
-                        # =========================================================
 
                         path_features.append(wsi_bag)
 

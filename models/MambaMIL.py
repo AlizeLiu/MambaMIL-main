@@ -1,6 +1,5 @@
 """
-IHG-Mamba (Intrinsic Hierarchical Graph-Mamba)
-Modified from MambaMIL
+MambaMIL - IHG-Mamba with parameterized architecture
 """
 import torch
 import torch.nn as nn
@@ -9,7 +8,6 @@ from mamba.mamba_ssm import BiMamba
 from mamba.mamba_ssm import Mamba
 import torch.nn.functional as F
 
-from .AtpPool import ATPPool
 
 def initialize_weights(module):
     for m in module.modules():
@@ -23,56 +21,127 @@ def initialize_weights(module):
 
 
 class MambaMIL(nn.Module):
-    def __init__(self, in_dim, n_classes, dropout, act, survival=False, layer=1, rate=10, type="SRMamba", pool_size=100):
+    def __init__(
+        self,
+        in_dim,
+        n_classes,
+        dropout,
+        act,
+        survival=False,
+        layer=1,
+        rate=10,
+        type="SRMamba",
+        hidden_dim=256,
+        local_layers=None,
+        global_layers=None,
+        pool_size=100,
+        use_atp_pool=True,
+        diffusion_steps=2,
+        K_init=1.0,
+        atp_dt=0.1,
+    ):
         super(MambaMIL, self).__init__()
-        self._fc1 = [nn.Linear(in_dim, 256)]
+
+        self.hidden_dim = hidden_dim
+        self.survival = survival
+        self.rate = rate
+        self.type = type
+        self.use_atp_pool = use_atp_pool
+        self.n_classes = n_classes
+
+        # 兼容旧参数：如果没有单独传 local/global，就用 layer
+        if local_layers is None:
+            local_layers = layer
+        if global_layers is None:
+            global_layers = layer
+
+        # Build feature extractor
+        self._fc1 = [nn.Linear(in_dim, hidden_dim)]
+
         if act.lower() == 'relu':
             self._fc1 += [nn.ReLU()]
         elif act.lower() == 'gelu':
             self._fc1 += [nn.GELU()]
+
         if dropout:
             self._fc1 += [nn.Dropout(dropout)]
 
         self._fc1 = nn.Sequential(*self._fc1)
-        self.norm = nn.LayerNorm(256)
 
-        self.survival = survival
-        self.rate = rate
-        self.type = type
+        # Build Mamba layers
+        self.local_layers = self._build_mamba_layers(local_layers, type)
+        self.global_layers = self._build_mamba_layers(global_layers, type)
 
-        # ===== 2. 构建层级 Mamba 骨架 =====
-        # 轻量化：Local=1层, Global=1层，减少参数量防止过拟合
-        self.local_layers = self._build_mamba_layers(1, type)
-        self.global_layers = self._build_mamba_layers(1, type)
+        # Build ATP-Pool or Identity
+        if self.use_atp_pool:
+            self.atp_pool = ATPPool(
+                dim=hidden_dim,
+                pool_size=pool_size,
+                K_init=K_init,
+                diffusion_steps=diffusion_steps,
+                dt=atp_dt,
+            )
+        else:
+            self.atp_pool = nn.Identity()
 
-        # ===== 3. 插入各向异性拓扑池化 =====
-        self.atp_pool = ATPPool(dim=256, pool_size=pool_size)
+        self.norm = nn.LayerNorm(hidden_dim)
 
-        self.n_classes = n_classes
-        self.classifier = nn.Linear(256, self.n_classes)
         self.attention = nn.Sequential(
-            nn.Linear(256, 128),
+            nn.Linear(hidden_dim, 128),
             nn.Tanh(),
             nn.Linear(128, 1)
         )
 
+        self.classifier = nn.Linear(hidden_dim, self.n_classes)
+
         self.apply(initialize_weights)
 
     def _build_mamba_layers(self, layer_num, mamba_type):
-        """内部方法：用于快速构建指定类型的 Mamba Block 堆叠"""
         layers = nn.ModuleList()
+
         for _ in range(layer_num):
             if mamba_type == "SRMamba":
-                layers.append(nn.Sequential(nn.LayerNorm(256),
-                                            SRMamba(d_model=256, d_state=16, d_conv=4, expand=2, use_fast_path=True)))
+                layers.append(
+                    nn.Sequential(
+                        nn.LayerNorm(self.hidden_dim),
+                        SRMamba(
+                            d_model=self.hidden_dim,
+                            d_state=16,
+                            d_conv=4,
+                            expand=2,
+                            use_fast_path=True
+                        )
+                    )
+                )
             elif mamba_type == "Mamba":
-                layers.append(nn.Sequential(nn.LayerNorm(256),
-                                            Mamba(d_model=256, d_state=16, d_conv=4, expand=2, use_fast_path=True)))
+                layers.append(
+                    nn.Sequential(
+                        nn.LayerNorm(self.hidden_dim),
+                        Mamba(
+                            d_model=self.hidden_dim,
+                            d_state=16,
+                            d_conv=4,
+                            expand=2,
+                            use_fast_path=True
+                        )
+                    )
+                )
             elif mamba_type == "BiMamba":
-                layers.append(nn.Sequential(nn.LayerNorm(256),
-                                            BiMamba(d_model=256, d_state=16, d_conv=4, expand=2, use_fast_path=True)))
+                layers.append(
+                    nn.Sequential(
+                        nn.LayerNorm(self.hidden_dim),
+                        BiMamba(
+                            d_model=self.hidden_dim,
+                            d_state=16,
+                            d_conv=4,
+                            expand=2,
+                            use_fast_path=True
+                        )
+                    )
+                )
             else:
-                raise NotImplementedError("Mamba [{}] is not implemented".format(mamba_type))
+                raise NotImplementedError(f"Mamba [{mamba_type}] is not implemented")
+
         return layers
 
     def forward(self, x):
@@ -80,65 +149,54 @@ class MambaMIL(nn.Module):
             x = x.expand(1, -1, -1)
         h = x.float()  # [B, N, in_dim]
 
-        h = self._fc1(h)  # [B, N, 256] (N 约等于 5000+)
+        h = self._fc1(h)  # [B, N, hidden_dim]
 
-        # ===== 阶段 1: 微观环境建模 (Local Mamba) =====
+        # Phase 1: Local Mamba (micro-environment modeling)
         for layer in self.local_layers:
             h_ = h
-            # 原本的 MambaMIL 中 SRMamba 有额外的 rate 参数
-            if self.type == "SRMamba":
-                h = layer[1](layer[0](h), rate=self.rate)
-            else:
-
-                h = layer[1](layer[0](h))
+            h = layer[0](h)
+            h = layer[1](h, rate=self.rate) if self.type == "SRMamba" else layer[1](h)
             h = h + h_
 
-        # ===== 阶段 2: 边界保留降维 (ATP-Pool) =====
-        # 将微观特征通过各向异性扩散，压缩成宏观特征
-        h = self.atp_pool(h) # 长度瞬间缩小: [B, N // pool_size, 256]
+        # ATP-Pool: compress sequence length
+        h = self.atp_pool(h)  # [B, N // pool_size, hidden_dim] or Identity
 
-        # ===== 阶段 3: 宏观组织建模 (Global Mamba) =====
+        # Phase 2: Global Mamba (macro-context modeling)
         for layer in self.global_layers:
             h_ = h
-            if self.type == "SRMamba":
-                h = layer[1](layer[0](h), rate=self.rate)
-            else:
-                h = layer[1](layer[0](h))
+            h = layer[0](h)
+            h = layer[1](h, rate=self.rate) if self.type == "SRMamba" else layer[1](h)
             h = h + h_
 
-        # ===== 阶段 4: 双重聚合之 ABMIL 读出头 =====
         h = self.norm(h)
-        A = self.attention(h) # [B, M, 1] (M = N // pool_size)
-        A = torch.transpose(A, 1, 2)
-        A = F.softmax(A, dim=-1) # [B, 1, M]
-        h = torch.bmm(A, h) # [B, 1, 256]
-        h = h.squeeze(0)    # [B, 256]
 
-        # ===== 阶段 5: 下游任务预测 =====
+        # Attention pooling
+        A = self.attention(h)  # [B, M, 1]
+        A = torch.transpose(A, 1, 2)  # [B, 1, M]
+        A = F.softmax(A, dim=-1)
+        h = torch.bmm(A, h)  # [B, 1, hidden_dim]
+        h = h.squeeze(1)  # [B, hidden_dim]
+
         logits = self.classifier(h)  # [B, n_classes]
         Y_prob = F.softmax(logits, dim=1)
         Y_hat = torch.topk(logits, 1, dim=1)[1]
-
-        # 将缩小后的注意力权重返回，后续可视化宏观热力图会用到
-        A_raw = A.clone()
+        A_raw = None
         results_dict = None
 
         if self.survival:
-            Y_hat = torch.topk(logits, 1, dim = 1)[1]
+            Y_hat = torch.topk(logits, 1, dim=1)[1]
             hazards = torch.sigmoid(logits)
             S = torch.cumprod(1 - hazards, dim=1)
-            return hazards, S, Y_hat, A_raw, None # 返回 A_raw 替代原本的 None
+            return hazards, S, Y_hat, None, None
 
         return logits, Y_prob, Y_hat, A_raw, results_dict
 
     def relocate(self):
         device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
         self._fc1 = self._fc1.to(device)
-        # 将新增加的层挂载到 GPU
         self.local_layers = self.local_layers.to(device)
         self.global_layers = self.global_layers.to(device)
         self.atp_pool = self.atp_pool.to(device)
-        
         self.attention = self.attention.to(device)
         self.norm = self.norm.to(device)
         self.classifier = self.classifier.to(device)
