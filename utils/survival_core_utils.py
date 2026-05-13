@@ -339,11 +339,15 @@ def train_loop_survival(epoch, model, loader, optimizer, n_classes, writer=None,
 
         if (batch_idx + 1) % 50 == 0:
             print('batch {}, loss: {:.4f}, label: {}, event_time: {:.4f}, risk: {:.4f}, bag_size: {}'.format(batch_idx, loss_value + loss_reg, label.item(), float(event_time), float(risk), data_WSI.size(0)))
-        # backward pass
-        loss_scaled = loss / gc + loss_reg
+        # backward pass with gradient accumulation
+        total_loss = loss + loss_reg
+        loss_scaled = total_loss / gc
         loss_scaled.backward()
 
-        if (batch_idx + 1) % gc == 0: 
+        is_update_step = (batch_idx + 1) % gc == 0
+        is_last_batch = (batch_idx + 1) == len(loader)
+
+        if is_update_step or is_last_batch:
             optimizer.step()
             optimizer.zero_grad()
 
@@ -412,6 +416,11 @@ def validate_survival(cur, epoch, model, loader, n_classes, early_stopping=None,
         if early_stopping.early_stop:
             print("Early stopping")
             return True
+    else:
+        # Early stopping 关闭时，每个 epoch 都保存 checkpoint
+        assert results_dir
+        ckpt_name = os.path.join(results_dir, "s_{}_checkpoint.pt".format(cur))
+        torch.save(model.state_dict(), ckpt_name)
 
     return False
 

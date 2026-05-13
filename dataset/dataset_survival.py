@@ -444,7 +444,7 @@ class Generic_MIL_Survival_Dataset(Generic_WSI_Survival_Dataset):
                     if len(path_features) > 0:
                         path_features = torch.cat(path_features, dim=0)
                     else:
-                        path_features = torch.zeros((1, 1))  # 防崩溃保底
+                        raise RuntimeError(f"No valid features found for case {case_id}. All slide IDs: {slide_ids}")
 
                     return (path_features, torch.zeros((1, 1)), label, event_time, c)
 

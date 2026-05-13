@@ -8,6 +8,7 @@ from mamba.mamba_ssm import BiMamba
 from mamba.mamba_ssm import Mamba
 import torch.nn.functional as F
 
+from .AtpPool import ATPPool
 
 def initialize_weights(module):
     for m in module.modules():

@@ -90,12 +90,14 @@ def main(args):
     else:
         save_name = 'summary.csv'
     final_df.to_csv(os.path.join(args.results_dir, save_name))
-    if not args.k_fold:
-        mean_test = final_df['test_cindex'].mean()
-        std_test = final_df['test_cindex'].std()
     mean_val = final_df['val_cindex'].mean()
     std_val = final_df['val_cindex'].std()
 
+    if not args.k_fold:
+        mean_test = final_df['test_cindex'].mean()
+        std_test = final_df['test_cindex'].std()
+
+ 
     if args.k_fold:
         df_append = pd.DataFrame({
             'folds': ['mean', 'std'],
