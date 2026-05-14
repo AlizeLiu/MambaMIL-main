@@ -27,21 +27,21 @@ def main(args):
     wandb.init(project=args.task)
     wandb.config.update(args)
     if args.k_start == -1:
-        start = 0
+        fold_start = 0
     else:
-        start = args.k_start
+        fold_start = args.k_start
     if args.k_end == -1:
-        end = args.k
+        fold_end = args.k
     else:
-        end = args.k_end
+        fold_end = args.k_end
 
     latest_test_cindex = []
     latest_val_cindex = []
     
-    folds = np.arange(start, end)
+    folds = np.arange(fold_start, fold_end)
     
     for i in folds:
-        start = timer()
+        start_time = timer()
         seed_torch(args.seed)
         results_pkl_path = os.path.join(args.results_dir, 'split_{}_results.pkl'.format(i))
         if os.path.isfile(results_pkl_path):
@@ -86,7 +86,7 @@ def main(args):
         final_df = pd.DataFrame({'folds': folds, 'test_cindex': latest_test_cindex, 
             'val_cindex': latest_val_cindex, })
     if len(folds) != args.k:
-        save_name = 'summary_partial_{}_{}.csv'.format(start, end)
+        save_name = 'summary_partial_{}_{}.csv'.format(fold_start, fold_end)
     else:
         save_name = 'summary.csv'
     final_df.to_csv(os.path.join(args.results_dir, save_name))
@@ -111,7 +111,7 @@ def main(args):
         })
     final_df = pd.concat([final_df, df_append])
     if len(folds) != args.k:
-        save_name = 'summary_partial_{}_{}.csv'.format(start, end)
+        save_name = 'summary_partial_{}_{}.csv'.format(fold_start, fold_end)
     else:
         save_name = 'summary.csv'
     final_df.to_csv(os.path.join(args.results_dir, save_name))
@@ -184,7 +184,7 @@ parser.add_argument('--k_fold', action='store_true', default=False, help='use k-
 ## mambamil
 
 parser.add_argument('--mambamil_rate',type=int, default=10, help='mambamil_rate')
-parser.add_argument('--mambamil_layer',type=int, default=2, help='mambamil_layer')
+parser.add_argument('--mambamil_layer',type=int, default=2, help='legacy param: actual layers controlled by local_layers/global_layers')
 parser.add_argument('--mambamil_type',type=str, default='SRMamba', choices= ['Mamba', 'BiMamba', 'SRMamba'], help='mambamil_type')
 
 parser.add_argument('--csv_path', type=str, default=None, help='path to the dataset csv file')
@@ -207,7 +207,7 @@ parser.add_argument('--global_layers', type=int, default=1,
                     help='number of global Mamba layers')
 
 parser.add_argument('--diffusion_steps', type=int, default=2,
-                    help='number of anisotropic diffusion steps in ATP-Pool')
+                    help='anisotropic diffusion steps in ATP-Pool (0=disable diffusion but keep avg_pool)')
 
 parser.add_argument('--K_init', type=float, default=0.5,
                     help='initial boundary conductance threshold K in ATP-Pool')
@@ -219,10 +219,15 @@ parser.add_argument('--norm_type', type=str, default='mean', choices=['mean', 's
                     help='norm type for gradient in ATP-Pool: mean (scale-stable) or sum (L2)')
 
 parser.add_argument('--disable_atp_pool', action='store_true', default=False,
-                    help='disable ATP-Pool for ablation')
+                    help='completely remove ATP-Pool (NOT same as diffusion_steps=0)')
 
-parser.add_argument('--features_already_hilbert', action='store_true', default=True,
-                    help='whether input .pt features are already Hilbert ordered')
+parser.add_argument('--features_already_hilbert', dest='features_already_hilbert',
+                    action='store_true', default=True,
+                    help='input .pt features are already Hilbert ordered (default)')
+
+parser.add_argument('--features_not_hilbert', dest='features_already_hilbert',
+                    action='store_false',
+                    help='input .pt features are NOT Hilbert ordered (use with --use_hilbert_index)')
 
 parser.add_argument('--use_hilbert_index', action='store_true', default=False,
                     help='load hilbert/*.pt index and reorder features inside DataLoader')
@@ -250,6 +255,9 @@ args = parser.parse_args()
 # 计算派生参数
 args.use_atp_pool = not args.disable_atp_pool
 args.use_random_sampling = not args.disable_random_sampling
+
+# 当前 MIL 生存分析 pipeline 仅支持 batch_size=1
+assert args.batch_size == 1, f"Current survival MIL pipeline only supports batch_size=1, got {args.batch_size}"
 
 device=torch.device("cuda" if torch.cuda.is_available() else "cpu")
 print('Deviece is:', device)
@@ -288,6 +296,38 @@ settings = {'num_splits': args.k,
             "use_drop_out": args.drop_out,
             'weighted_sample': args.weighted_sample,
             'opt': args.opt}
+
+# IHG-Mamba 完整参数记录
+settings.update({
+    'hidden_dim': args.hidden_dim,
+    'max_seq_len': args.max_seq_len,
+    'pool_size': args.pool_size,
+    'local_layers': args.local_layers,
+    'global_layers': args.global_layers,
+    'diffusion_steps': args.diffusion_steps,
+    'K_init': args.K_init,
+    'atp_dt': args.atp_dt,
+    'norm_type': args.norm_type,
+    'use_atp_pool': args.use_atp_pool,
+    'features_already_hilbert': args.features_already_hilbert,
+    'use_hilbert_index': args.use_hilbert_index,
+    'disable_random_sampling': args.disable_random_sampling,
+    'num_eval_views': args.num_eval_views,
+    'es_warmup': args.es_warmup,
+    'es_patience': args.es_patience,
+    'es_stop_epoch': args.es_stop_epoch,
+    'mambamil_type': args.mambamil_type,
+    'mambamil_rate': args.mambamil_rate,
+    'mambamil_layer': args.mambamil_layer,
+    'gc': args.gc,
+    'in_dim': args.in_dim,
+    'preloading': args.preloading,
+    'backbone': args.backbone,
+    'patch_size': args.patch_size,
+    'csv_path': args.csv_path,
+    'data_root_dir': args.data_root_dir,
+    'batch_size': args.batch_size,
+})
 
 
 print('\nLoad Dataset')
@@ -348,10 +388,10 @@ for key, val in settings.items():
     print("{}:  {}".format(key, val))        
 
 if __name__ == "__main__":
-    start = timer()
+    start_time = timer()
     results = main(args)
-    end = timer()
+    end_time = timer()
     print("finished!")
     print("end script")
-    print('Script Time: %f seconds' % (end - start))
+    print('Script Time: %f seconds' % (end_time - start_time))
 

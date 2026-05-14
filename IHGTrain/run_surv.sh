@@ -8,11 +8,12 @@ export WANDB_MODE=offline
 cd /home/a255372639/projects/MambaMIL-main
 
 DATA_ROOT="/home/a255372639/TCGA-LUAD/LUAD_example"
-RESULTS_DIR="./experiments/train/TCGA_LUAD_survival"
-mkdir -p $RESULTS_DIR
+RESULTS_DIR="./experiments/train/ihg_ps50_K2.5_esfix"
+LOG_DIR="./logs"
+mkdir -p $RESULTS_DIR $LOG_DIR
 
 echo "=========================================="
-echo "  IHG-Mamba LUAD Survival Analysis - START"
+echo "  IHG-Mamba ps50_K2.5 esfix - START"
 echo "  $(date)"
 echo "=========================================="
 
@@ -47,16 +48,17 @@ python main_survival.py \
     --csv_path "dataset_csv/LUAD_processed.csv" \
     --hidden_dim 256 \
     --max_seq_len 2500 \
-    --pool_size 100 \
+    --pool_size 50 \
     --local_layers 1 \
     --global_layers 1 \
     --diffusion_steps 2 \
-    --K_init 0.5 \
+    --K_init 2.5 \
     --atp_dt 0.1 \
+    --norm_type mean \
     --features_already_hilbert \
-    --es_warmup 5 \
-    --es_patience 5 \
-    --es_stop_epoch 5
+    --es_warmup 0 \
+    --es_patience 10 \
+    --es_stop_epoch 10
 
 echo "=========================================="
 echo "  Training Complete! $(date)"

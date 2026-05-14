@@ -85,6 +85,12 @@ class Generic_WSI_Survival_Dataset(Dataset):
 
         self.patient_dict = patient_dict
 
+        # 统计多 slide patient
+        multi_slide_count = sum(1 for v in patient_dict.values() if len(v) > 1)
+        if multi_slide_count > 0:
+            print(f"[WARNING] {multi_slide_count} patients have multiple slides. "
+                  f"Slide boundaries may break Hilbert adjacency in Mamba/ATP.")
+
         slide_data = patients_df
         slide_data.reset_index(drop=True, inplace=True)
         slide_data = slide_data.assign(slide_id=slide_data['case_id'])
@@ -467,6 +473,13 @@ class Generic_Split(Generic_MIL_Survival_Dataset):
         self.slide_cls_ids = [[] for i in range(self.num_classes)]
         for i in range(self.num_classes):
             self.slide_cls_ids[i] = np.where(self.slide_data['label'] == i)[0]
+
+        # IHG-Mamba 参数默认值 (避免 preloading=yes 时属性缺失)
+        self.max_seq_len = 2500
+        self.use_hilbert_index = False
+        self.features_already_hilbert = True
+        self.use_random_sampling = True
+        self.num_eval_views = 1
         #! add from HIPT
         # cluster_dir = "/".join(data_dir.split("/")[0:-1])
         # if os.path.isfile(os.path.join(cluster_dir, 'fast_cluster_ids.pkl')):

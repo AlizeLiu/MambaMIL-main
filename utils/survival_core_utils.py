@@ -14,7 +14,10 @@ from utils.survival_utils import *
 import wandb
 
 class EarlyStopping:
-    """Early stops the training if validation loss doesn't improve after a given patience."""
+    """Early stops the training if validation loss doesn't improve after a given patience.
+    TODO: This class uses val_loss (lower is better). For non-k-fold survival analysis,
+          consider using EarlyStopping_cindex (higher is better) instead.
+    """
     def __init__(self, warmup=5, patience=15, stop_epoch=20, verbose=False):
         """
         Args:
@@ -255,6 +258,10 @@ def train(datasets: tuple, cur: int, args: Namespace):
         split.features_already_hilbert = args.features_already_hilbert
         split.use_random_sampling = args.use_random_sampling
         split.num_eval_views = args.num_eval_views
+
+    if args.num_eval_views > 1:
+        print("[WARNING] num_eval_views > 1 is currently not implemented in "
+              "validate_survival/summary_survival. It will be ignored.")
     
     # 设置训练/验证采样模式
     train_split.training_mode = True   # 训练：随机采样（instance-level augmentation）
@@ -431,6 +438,11 @@ def validate_survival(cur, epoch, model, loader, n_classes, early_stopping=None,
     c_index = concordance_index_censored((1-all_censorships).astype(bool), all_event_times, all_risk_scores, tied_tol=1e-08)[0]
 
     print('Epoch: {}, val_loss_surv: {:.4f}, val_loss: {:.4f}, val_c_index: {:.4f}'.format(epoch, val_loss_surv, val_loss, c_index))
+
+    # 监控 ATP K 的变化
+    if hasattr(model, 'atp_pool') and hasattr(model.atp_pool, 'K'):
+        print(f'[ATP] epoch={epoch}, K={model.atp_pool.K.item():.4f}')
+
     if writer:
         writer.add_scalar('val/loss_surv', val_loss_surv, epoch)
         writer.add_scalar('val/loss', val_loss, epoch)
@@ -446,10 +458,13 @@ def validate_survival(cur, epoch, model, loader, n_classes, early_stopping=None,
             print("Early stopping")
             return True
     else:
-        # Early stopping 关闭时，每个 epoch 都保存 checkpoint
+        # Early stopping 关闭时，使用 Monitor_CIndex 保存 best C-index checkpoint
         assert results_dir
         ckpt_name = os.path.join(results_dir, "s_{}_checkpoint.pt".format(cur))
-        torch.save(model.state_dict(), ckpt_name)
+        if monitor_cindex is not None:
+            monitor_cindex(c_index, model, ckpt_name=ckpt_name)
+        else:
+            torch.save(model.state_dict(), ckpt_name)
 
     return False
 

@@ -89,6 +89,7 @@ class MambaMIL(nn.Module):
 
         self.norm = nn.LayerNorm(hidden_dim)
 
+        # 注意：这是标准 attention (Linear->Tanh->Linear)，不是 Gated Attention (Linear->sigmoid + Linear->softmax)
         self.attention = nn.Sequential(
             nn.Linear(hidden_dim, 128),
             nn.Tanh(),
@@ -183,14 +184,14 @@ class MambaMIL(nn.Module):
         logits = self.classifier(h)  # [B, n_classes]
         Y_prob = F.softmax(logits, dim=1)
         Y_hat = torch.topk(logits, 1, dim=1)[1]
-        A_raw = None
+        A_raw = A.detach()  # super-node attention weights
         results_dict = None
 
         if self.survival:
             Y_hat = torch.topk(logits, 1, dim=1)[1]
             hazards = torch.sigmoid(logits)
             S = torch.cumprod(1 - hazards, dim=1)
-            return hazards, S, Y_hat, None, None
+            return hazards, S, Y_hat, A_raw, None
 
         return logits, Y_prob, Y_hat, A_raw, results_dict
 
