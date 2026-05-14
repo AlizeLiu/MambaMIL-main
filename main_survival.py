@@ -215,6 +215,9 @@ parser.add_argument('--K_init', type=float, default=0.5,
 parser.add_argument('--atp_dt', type=float, default=0.1,
                     help='diffusion step size in ATP-Pool')
 
+parser.add_argument('--norm_type', type=str, default='mean', choices=['mean', 'sum'],
+                    help='norm type for gradient in ATP-Pool: mean (scale-stable) or sum (L2)')
+
 parser.add_argument('--disable_atp_pool', action='store_true', default=False,
                     help='disable ATP-Pool for ablation')
 

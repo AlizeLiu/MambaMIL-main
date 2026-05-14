@@ -9,10 +9,12 @@ class ATPPool(nn.Module):
     基于 Hilbert 流形的各向异性拓扑池化
     """
 
-    def __init__(self, dim, pool_size=100, K_init=0.5, diffusion_steps=2, dt=0.1):
+    def __init__(self, dim, pool_size=100, K_init=0.5, diffusion_steps=2, dt=0.1,
+                 norm_type='mean'):
         super(ATPPool, self).__init__()
         self.pool_size = pool_size
         self.diffusion_steps = diffusion_steps
+        self.norm_type = norm_type  # 'mean' or 'sum'
 
         # K 设为可学习参数 (Learnable Parameter)
         self.K = nn.Parameter(torch.tensor(float(K_init)))
@@ -50,9 +52,9 @@ class ATPPool(nn.Module):
                 'mean': t.mean().item(),
                 'std': t.std().item(),
                 'min': t.min().item(),
-                'p10': t.kthvalue(max(1, len(vals) // 10)).item(),
+                'p10': t.kthvalue(max(1, len(vals) // 10)).values.item(),
                 'median': t.median().item(),
-                'p90': t.kthvalue(max(1, len(vals) * 9 // 10)).item(),
+                'p90': t.kthvalue(max(1, len(vals) * 9 // 10)).values.item(),
                 'max': t.max().item(),
             }
         return summary
@@ -73,10 +75,15 @@ class ATPPool(nn.Module):
             grad_left = torch.zeros_like(x)
             grad_left[:, 1:, :] = x[:, :-1, :] - x[:, 1:, :]
 
-            # 计算梯度的均方范数 (表示局部异质性剧烈程度)
-            # 使用 mean 代替 sum，避免 hidden_dim 缩放导致 c≈0
-            norm_right_sq = torch.mean(grad_right ** 2, dim=-1, keepdim=True)
-            norm_left_sq = torch.mean(grad_left ** 2, dim=-1, keepdim=True)
+            # 计算梯度范数
+            # mean: 每维平均差异，对 hidden_dim 稳定
+            # sum:  L2 范数平方，随 hidden_dim 增大
+            if self.norm_type == 'mean':
+                norm_right_sq = torch.mean(grad_right ** 2, dim=-1, keepdim=True)
+                norm_left_sq = torch.mean(grad_left ** 2, dim=-1, keepdim=True)
+            else:
+                norm_right_sq = torch.sum(grad_right ** 2, dim=-1, keepdim=True)
+                norm_left_sq = torch.sum(grad_left ** 2, dim=-1, keepdim=True)
 
             # c = exp(-(|nabla X|^2) / K^2)
             # 防止 K 变成不稳定值
@@ -93,11 +100,11 @@ class ATPPool(nn.Module):
                         'K': K.item(),
                         'norm_sq_mean': n_flat.mean().item(),
                         'norm_sq_median': n_flat.median().item(),
-                        'norm_sq_p90': n_flat.kthvalue(max(1, int(n_flat.numel() * 0.9))).item(),
+                        'norm_sq_p90': n_flat.kthvalue(max(1, int(n_flat.numel() * 0.9))).values.item(),
                         'c_mean': c_flat.mean().item(),
                         'c_median': c_flat.median().item(),
-                        'c_p10': c_flat.kthvalue(max(1, int(n_flat.numel() * 0.1))).item(),
-                        'c_p90': c_flat.kthvalue(max(1, int(n_flat.numel() * 0.9))).item(),
+                        'c_p10': c_flat.kthvalue(max(1, int(n_flat.numel() * 0.1))).values.item(),
+                        'c_p90': c_flat.kthvalue(max(1, int(n_flat.numel() * 0.9))).values.item(),
                         'ratio_c_lt_01': (c_flat < 0.1).float().mean().item(),
                         'ratio_c_lt_03': (c_flat < 0.3).float().mean().item(),
                         'ratio_c_gt_09': (c_flat > 0.9).float().mean().item(),

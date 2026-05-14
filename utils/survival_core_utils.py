@@ -31,7 +31,7 @@ class EarlyStopping:
         self.counter = 0
         self.best_score = None
         self.early_stop = False
-        self.val_loss_min = np.Inf
+        self.val_loss_min = np.inf
 
     def __call__(self, epoch, val_loss, model, ckpt_name = 'checkpoint.pt'):
 
@@ -78,26 +78,25 @@ class EarlyStopping_cindex:
         self.counter = 0
         self.best_score = None
         self.early_stop = False
-        self.val_loss_min = np.Inf
+        self.val_loss_min = np.inf
 
     def __call__(self, epoch, val_cindex, model, ckpt_name = 'checkpoint.pt'):
 
         score = val_cindex
 
-        if epoch < self.warmup:
-            pass
-        elif self.best_score is None:
+        # 任何时候只要 C-index 更好就保存
+        if self.best_score is None or score > self.best_score:
             self.best_score = score
             self.save_checkpoint(val_cindex, model, ckpt_name)
-        elif score <= self.best_score:
+            self.counter = 0
+            return
+
+        # warmup 之后才开始 early stopping 计数
+        if epoch >= self.warmup:
             self.counter += 1
             print(f'EarlyStopping counter: {self.counter} out of {self.patience}')
             if self.counter >= self.patience and epoch > self.stop_epoch:
                 self.early_stop = True
-        else:
-            self.best_score = score
-            self.save_checkpoint(val_cindex, model, ckpt_name)
-            self.counter = 0
 
     def save_checkpoint(self, val_cindex, model, ckpt_name):
         '''Saves model when validation C-index improves.'''
@@ -230,6 +229,7 @@ def train(datasets: tuple, cur: int, args: Namespace):
             diffusion_steps=args.diffusion_steps,
             K_init=args.K_init,
             atp_dt=args.atp_dt,
+            norm_type=args.norm_type,
         )
     
     else:

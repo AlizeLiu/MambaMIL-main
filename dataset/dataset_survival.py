@@ -391,8 +391,7 @@ class Generic_MIL_Survival_Dataset(Generic_WSI_Survival_Dataset):
                     path_features = []
                     for slide_id in slide_ids:
                         # 1. 精准指向特征文件 (强制读取 pt_files 文件夹)
-                        slide_id_clean = os.path.splitext(slide_id)[0]
-                        wsi_path = os.path.join(data_dir, 'pt_files', f'{slide_id_clean}.pt')
+                        wsi_path = os.path.join(data_dir, 'pt_files', f'{slide_id}.pt')
 
                         if not os.path.exists(wsi_path):
                             print(f"[Error] 找不到特征文件: {wsi_path}")
@@ -405,7 +404,7 @@ class Generic_MIL_Survival_Dataset(Generic_WSI_Survival_Dataset):
                         # =========================================================
                         # 只有当 features_already_hilbert=False 且 use_hilbert_index=True 时才重排
                         if self.use_hilbert_index and not self.features_already_hilbert:
-                            hilbert_path = os.path.join(data_dir, 'hilbert', f'{slide_id_clean}_hilbert.pt')
+                            hilbert_path = os.path.join(data_dir, 'hilbert', f'{slide_id}_hilbert.pt')
 
                             if not os.path.exists(hilbert_path):
                                 raise FileNotFoundError(f"Missing Hilbert index: {hilbert_path}")
@@ -414,12 +413,12 @@ class Generic_MIL_Survival_Dataset(Generic_WSI_Survival_Dataset):
 
                             if hilbert_idx.numel() != wsi_bag.shape[0]:
                                 raise RuntimeError(
-                                    f"Hilbert index length mismatch for {slide_id_clean}: "
+                                    f"Hilbert index length mismatch for {slide_id}: "
                                     f"idx={hilbert_idx.numel()}, feature={wsi_bag.shape[0]}"
                                 )
 
                             wsi_bag = wsi_bag[hilbert_idx]
-                            print(f"\n✅ [IHG-Mamba] Hilbert 重排 {slide_id_clean}: {wsi_bag.shape}")
+                            print(f"\n✅ [IHG-Mamba] Hilbert 重排 {slide_id}: {wsi_bag.shape}")
 
                         # ===== 防 OOM: 限制最大序列长度 =====
                         max_seq_len = getattr(self, 'max_seq_len', 2500)
@@ -437,7 +436,7 @@ class Generic_MIL_Survival_Dataset(Generic_WSI_Survival_Dataset):
                                 indices = torch.linspace(0, orig_len - 1, max_seq_len).long()
 
                             wsi_bag = wsi_bag[indices]
-                            print(f"[Subsample] {slide_id_clean}: {orig_len} -> {wsi_bag.shape[0]}")
+                            print(f"[Subsample] {slide_id}: {orig_len} -> {wsi_bag.shape[0]}")
 
                         path_features.append(wsi_bag)
 
