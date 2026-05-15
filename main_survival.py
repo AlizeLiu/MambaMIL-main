@@ -221,6 +221,16 @@ parser.add_argument('--norm_type', type=str, default='mean', choices=['mean', 's
 parser.add_argument('--disable_atp_pool', action='store_true', default=False,
                     help='completely remove ATP-Pool (NOT same as diffusion_steps=0)')
 
+parser.add_argument('--pool_mode', type=str, default='diffusion',
+                    choices=['avg', 'diffusion', 'residual'],
+                    help='ATPPool mode: avg (plain), diffusion (PM diffusion), residual (boundary residual)')
+
+parser.add_argument('--tau_init', type=float, default=2.0,
+                    help='initial temperature for boundary residual pooling')
+
+parser.add_argument('--gamma_init', type=float, default=0.0,
+                    help='initial raw gamma for boundary residual pooling; 0 means avg pooling at init')
+
 parser.add_argument('--features_already_hilbert', dest='features_already_hilbert',
                     action='store_true', default=True,
                     help='input .pt features are already Hilbert ordered (default)')
@@ -308,6 +318,9 @@ settings.update({
     'K_init': args.K_init,
     'atp_dt': args.atp_dt,
     'norm_type': args.norm_type,
+    'pool_mode': args.pool_mode,
+    'tau_init': args.tau_init,
+    'gamma_init': args.gamma_init,
     'use_atp_pool': args.use_atp_pool,
     'features_already_hilbert': args.features_already_hilbert,
     'use_hilbert_index': args.use_hilbert_index,

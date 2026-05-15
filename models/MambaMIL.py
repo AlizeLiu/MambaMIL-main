@@ -41,6 +41,9 @@ class MambaMIL(nn.Module):
         K_init=0.5,
         atp_dt=0.1,
         norm_type='mean',
+        pool_mode='diffusion',
+        tau_init=2.0,
+        gamma_init=0.0,
     ):
         super(MambaMIL, self).__init__()
 
@@ -83,6 +86,9 @@ class MambaMIL(nn.Module):
                 diffusion_steps=diffusion_steps,
                 dt=atp_dt,
                 norm_type=norm_type,
+                pool_mode=pool_mode,
+                tau_init=tau_init,
+                gamma_init=gamma_init,
             )
         else:
             self.atp_pool = nn.Identity()

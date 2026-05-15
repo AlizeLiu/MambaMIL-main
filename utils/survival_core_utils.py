@@ -2,6 +2,7 @@ from argparse import Namespace
 from collections import OrderedDict
 import os
 import pickle 
+import torch.nn.functional as F
 
 from lifelines.utils import concordance_index
 import numpy as np
@@ -233,6 +234,9 @@ def train(datasets: tuple, cur: int, args: Namespace):
             K_init=args.K_init,
             atp_dt=args.atp_dt,
             norm_type=args.norm_type,
+            pool_mode=args.pool_mode,
+            tau_init=args.tau_init,
+            gamma_init=args.gamma_init,
         )
     
     else:
@@ -439,9 +443,12 @@ def validate_survival(cur, epoch, model, loader, n_classes, early_stopping=None,
 
     print('Epoch: {}, val_loss_surv: {:.4f}, val_loss: {:.4f}, val_c_index: {:.4f}'.format(epoch, val_loss_surv, val_loss, c_index))
 
-    # 监控 ATP K 的变化
+    # 监控 ATP 参数变化
     if hasattr(model, 'atp_pool') and hasattr(model.atp_pool, 'K'):
-        print(f'[ATP] epoch={epoch}, K={model.atp_pool.K.item():.4f}')
+        K_val = model.atp_pool.K.item()
+        gamma_val = torch.tanh(model.atp_pool.gamma_raw).item() if hasattr(model.atp_pool, 'gamma_raw') else 0.0
+        tau_val = F.softplus(model.atp_pool.tau_raw).item() if hasattr(model.atp_pool, 'tau_raw') else 0.0
+        print(f'[ATP] epoch={epoch}, K={K_val:.4f}, gamma={gamma_val:.4f}, tau={tau_val:.4f}')
 
     if writer:
         writer.add_scalar('val/loss_surv', val_loss_surv, epoch)

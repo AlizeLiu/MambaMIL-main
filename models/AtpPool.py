@@ -7,40 +7,57 @@ class ATPPool(nn.Module):
     """
     Anisotropic Topological Pooling on Hilbert Manifold (ATP-Pool)
     基于 Hilbert 流形的各向异性拓扑池化
+
+    pool_mode:
+        "avg"        - 普通 padding + avg_pool1d (无扩散, 无边界残差)
+        "diffusion"  - Perona-Malik 扩散 + avg_pool1d (原始模式)
+        "residual"   - Boundary Residual Pooling (avg + 边界残差)
     """
 
-    def __init__(self, dim, pool_size=100, K_init=0.5, diffusion_steps=2, dt=0.1,
-                 norm_type='mean'):
+    def __init__(
+        self,
+        dim,
+        pool_size=100,
+        K_init=0.5,
+        diffusion_steps=2,
+        dt=0.1,
+        norm_type='mean',
+        pool_mode='diffusion',
+        tau_init=2.0,
+        gamma_init=0.0,
+    ):
         super(ATPPool, self).__init__()
+        self.dim = dim
         self.pool_size = pool_size
         self.diffusion_steps = diffusion_steps
-        self.norm_type = norm_type  # 'mean' or 'sum'
-
-        # K 设为可学习参数 (Learnable Parameter)
-        self.K = nn.Parameter(torch.tensor(float(K_init)))
-
-        # 扩散时间步长 (控制每次融合的力度)
         self.dt = dt
+        self.norm_type = norm_type
+        self.pool_mode = pool_mode
 
-        # 诊断模式：记录前 N 步的扩散统计量
+        # Learnable parameters
+        self.K = nn.Parameter(torch.tensor(float(K_init)))
+        self.tau_raw = nn.Parameter(torch.tensor(float(tau_init)))
+        self.gamma_raw = nn.Parameter(torch.tensor(float(gamma_init)))
+
+        # Diagnosis
         self._diag_enabled = False
         self._diag_step = 0
         self._diag_max_steps = 0
         self._diag_records = []
 
+    # ------------------------------------------------------------------
+    # Diagnosis helpers
+    # ------------------------------------------------------------------
     def enable_diagnosis(self, max_steps=200):
-        """启用诊断模式，记录前 max_steps 次 forward 的扩散统计量"""
         self._diag_enabled = True
         self._diag_step = 0
         self._diag_max_steps = max_steps
         self._diag_records = []
 
     def disable_diagnosis(self):
-        """关闭诊断模式"""
         self._diag_enabled = False
 
     def get_diagnosis_summary(self):
-        """返回诊断汇总"""
         if not self._diag_records:
             return None
         keys = self._diag_records[0].keys()
@@ -59,25 +76,125 @@ class ATPPool(nn.Module):
             }
         return summary
 
+    # ------------------------------------------------------------------
+    # Core helpers
+    # ------------------------------------------------------------------
+    def _edge_norm(self, x):
+        """Compute per-edge squared norm: [B, L-1, 1]"""
+        grad = x[:, 1:, :] - x[:, :-1, :]
+        if self.norm_type == 'mean':
+            norm_sq = torch.mean(grad ** 2, dim=-1, keepdim=True)
+        elif self.norm_type == 'sum':
+            norm_sq = torch.sum(grad ** 2, dim=-1, keepdim=True)
+        else:
+            raise ValueError(f"Unknown norm_type: {self.norm_type}")
+        return norm_sq
+
+    def _conductance_edges(self, x):
+        """Compute conductance on edges: c in [B, L-1, 1]"""
+        norm_sq = self._edge_norm(x)
+        K = torch.clamp(self.K, min=1e-3)
+        c = torch.exp(-norm_sq / (K ** 2 + 1e-6))
+        return c, norm_sq
+
+    def _edge_to_token_boundary(self, edge_boundary, L):
+        """Convert edge boundary [B, L-1, 1] to token boundary [B, L, 1]"""
+        # left[i] = edge_boundary[i-1] (pad front with 0)
+        left = F.pad(edge_boundary, (0, 0, 1, 0), value=0.0)
+        # right[i] = edge_boundary[i] (pad end with 0)
+        right = F.pad(edge_boundary, (0, 0, 0, 1), value=0.0)
+        return 0.5 * (left + right)
+
+    def _pad_to_pool_size(self, x, mode='replicate'):
+        """Pad x along dim=1 to be divisible by pool_size.
+        x: [B, L, D] -> [B, L_pad, D], pad_len
+        """
+        B, L, D = x.shape
+        pad_len = (self.pool_size - L % self.pool_size) % self.pool_size
+        if pad_len == 0:
+            return x, 0
+        # F.pad pads last dim first: (D_left, D_right, L_left, L_right)
+        x_pad = F.pad(x.transpose(1, 2), (0, pad_len), mode=mode).transpose(1, 2)
+        return x_pad.contiguous(), pad_len
+
+    # ------------------------------------------------------------------
+    # Pooling modes
+    # ------------------------------------------------------------------
+    def _avg_pool(self, x):
+        """Plain avg pooling: [B, L, D] -> [B, M, D]"""
+        B, L, D = x.shape
+        x_pad, _ = self._pad_to_pool_size(x, mode='replicate')
+        M = x_pad.shape[1] // self.pool_size
+        x_seg = x_pad.reshape(B, M, self.pool_size, D)
+        return x_seg.mean(dim=2)
+
+    def _boundary_residual_pool(self, x):
+        """Boundary Residual Pooling: avg + gamma * (boundary_weighted - avg)"""
+        B, L, D = x.shape
+
+        # Edge conductance and boundary
+        c, norm_sq = self._conductance_edges(x)
+        edge_b = 1.0 - c  # [B, L-1, 1]
+
+        # Token boundary
+        token_b = self._edge_to_token_boundary(edge_b, L)  # [B, L, 1]
+
+        # Pad to pool_size
+        x_pad, _ = self._pad_to_pool_size(x, mode='replicate')
+        b_pad, _ = self._pad_to_pool_size(token_b, mode='replicate')
+
+        B, Lp, D = x_pad.shape
+        M = Lp // self.pool_size
+
+        # Reshape into windows
+        x_seg = x_pad.reshape(B, M, self.pool_size, D)
+        b_seg = b_pad.reshape(B, M, self.pool_size, 1)
+
+        # Avg pooling (baseline)
+        z_avg = x_seg.mean(dim=2)  # [B, M, D]
+
+        # Boundary-weighted pooling
+        b_mean = b_seg.mean(dim=2, keepdim=True)
+        b_std = b_seg.std(dim=2, keepdim=True, unbiased=False)
+        b_norm = (b_seg - b_mean) / (b_std + 1e-6)  # [B, M, pool_size, 1]
+
+        tau = F.softplus(self.tau_raw) + 1e-6
+        weights = torch.softmax(tau * b_norm, dim=2)  # [B, M, pool_size, 1]
+
+        z_bd = (weights * x_seg).sum(dim=2)  # [B, M, D]
+
+        # Residual blend
+        gamma = torch.tanh(self.gamma_raw)
+        z = z_avg + gamma * (z_bd - z_avg)
+
+        # Diagnosis (residual mode only)
+        diag_this = self._diag_enabled and self._diag_step < self._diag_max_steps
+        if diag_this:
+            with torch.no_grad():
+                self._diag_records.append({
+                    'K': torch.clamp(self.K, min=1e-3).item(),
+                    'gamma': gamma.item(),
+                    'tau': tau.item(),
+                    'boundary_mean': token_b.mean().item(),
+                    'boundary_std': token_b.std().item(),
+                    'weight_entropy': -(weights * (weights + 1e-8).log()).sum(dim=2).mean().item(),
+                    'residual_delta_norm': (z_bd - z_avg).norm(dim=-1).mean().item(),
+                })
+            self._diag_step += 1
+
+        return z
+
     def _perona_malik_diffusion_1d(self, x):
-        """
-        核心物理算子：求解 1D Perona-Malik 偏微分方程
-        x shape: (Batch, Length, Dim)
-        """
-        diag_this_step = self._diag_enabled and self._diag_step < self._diag_max_steps
+        """Perona-Malik diffusion: [B, L, D] -> [B, L, D]"""
+        diag_this = self._diag_enabled and self._diag_step < self._diag_max_steps
 
         for step_idx in range(self.diffusion_steps):
-            # 向右梯度 (前向差分)
             grad_right = torch.zeros_like(x)
             grad_right[:, :-1, :] = x[:, 1:, :] - x[:, :-1, :]
 
-            # 向左梯度 (后向差分)
             grad_left = torch.zeros_like(x)
             grad_left[:, 1:, :] = x[:, :-1, :] - x[:, 1:, :]
 
-            # 计算梯度范数
-            # mean: 每维平均差异，对 hidden_dim 稳定
-            # sum:  L2 范数平方，随 hidden_dim 增大
             if self.norm_type == 'mean':
                 norm_right_sq = torch.mean(grad_right ** 2, dim=-1, keepdim=True)
                 norm_left_sq = torch.mean(grad_left ** 2, dim=-1, keepdim=True)
@@ -85,14 +202,11 @@ class ATPPool(nn.Module):
                 norm_right_sq = torch.sum(grad_right ** 2, dim=-1, keepdim=True)
                 norm_left_sq = torch.sum(grad_left ** 2, dim=-1, keepdim=True)
 
-            # c = exp(-(|nabla X|^2) / K^2)
-            # 防止 K 变成不稳定值
             K = torch.clamp(self.K, min=1e-3)
             c_right = torch.exp(-norm_right_sq / (K ** 2 + 1e-6))
             c_left = torch.exp(-norm_left_sq / (K ** 2 + 1e-6))
 
-            # 诊断：记录统计量 (只在第一个 diffusion step 记录)
-            if diag_this_step and step_idx == 0:
+            if diag_this and step_idx == 0:
                 with torch.no_grad():
                     c_flat = c_right.squeeze(-1).flatten()
                     n_flat = norm_right_sq.squeeze(-1).flatten()
@@ -110,54 +224,37 @@ class ATPPool(nn.Module):
                         'ratio_c_gt_09': (c_flat > 0.9).float().mean().item(),
                     })
 
-            # 执行流形扩散更新 (Manifold Diffusion Update)
             x = x + self.dt * (c_right * grad_right + c_left * grad_left)
 
-        if diag_this_step:
+        if diag_this:
             self._diag_step += 1
 
         return x
 
+    # ------------------------------------------------------------------
+    # Forward
+    # ------------------------------------------------------------------
     def forward(self, x):
-        """
-        前向传播
-        输入: x (B, L, D) - 局部 Mamba 出来的长序列
-        输出: pooled_x (B, M, D) - 压缩后的超节点序列
-        """
-        B, L, D = x.shape
+        assert x.dim() == 3, f"Expected 3D input, got {x.dim()}D"
+        assert x.shape[-1] == self.dim, f"Expected dim={self.dim}, got {x.shape[-1]}"
 
-        # 步骤 1：执行各向异性扩散，智能平滑同质区域，保留边界
-        x_diffused = self._perona_malik_diffusion_1d(x)
+        if self.pool_mode == "avg":
+            return self._avg_pool(x)
 
-        # 步骤 2：拓扑安全降采样 (Topological Downsampling)
-        # 处理长度不能被 pool_size 整除的情况
-        pad_len = (self.pool_size - L % self.pool_size) % self.pool_size
+        elif self.pool_mode == "diffusion":
+            x_diffused = self._perona_malik_diffusion_1d(x)
+            return self._avg_pool(x_diffused)
 
-        if pad_len > 0:
-            x_diffused = x_diffused.transpose(1, 2)
-            x_diffused = F.pad(x_diffused, (0, pad_len), mode='replicate')
+        elif self.pool_mode == "residual":
+            return self._boundary_residual_pool(x)
+
         else:
-            x_diffused = x_diffused.transpose(1, 2)
-
-        # 使用 1D 均值池化进行压缩，池化窗口大小为 pool_size
-        pooled_x = F.avg_pool1d(
-            x_diffused,
-            kernel_size=self.pool_size,
-            stride=self.pool_size
-        )
-
-        # 转回原始 shape: (B, M, D)
-        pooled_x = pooled_x.transpose(1, 2)
-
-        return pooled_x
+            raise ValueError(f"Unknown pool_mode: {self.pool_mode}")
 
 
 if __name__ == "__main__":
-    dummy_input = torch.randn(1, 10000, 512)
-
-    atp_pool = ATPPool(dim=512, pool_size=100)
-    output = atp_pool(dummy_input)
-
-    print(f"输入序列维度: {dummy_input.shape}")
-    print(f"输出序列维度: {output.shape}")
-    print(f"当前学习到的边界阈值 K: {atp_pool.K.item():.4f}")
+    x = torch.randn(1, 10000, 512)
+    pool = ATPPool(dim=512, pool_size=100)
+    y = pool(x)
+    print(f"输入: {x.shape} → 输出: {y.shape}")
+    print(f"K: {pool.K.item():.4f}")
