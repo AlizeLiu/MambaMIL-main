@@ -55,7 +55,8 @@ python main_survival.py \
     --K_init 2.5 \
     --atp_dt 0.1 \
     --norm_type mean \
-    --features_already_hilbert \
+    --features_not_hilbert \
+    --use_hilbert_index \
     --es_warmup 0 \
     --es_patience 10 \
     --es_stop_epoch 10

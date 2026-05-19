@@ -2,19 +2,20 @@
 source /home/a255372639/miniconda3/etc/profile.d/conda.sh
 conda activate ihg-mamba
 
-export CUDA_VISIBLE_DEVICES=1
+export CUDA_VISIBLE_DEVICES=3
 export PYTHONUNBUFFERED=1
 export WANDB_MODE=offline
 cd /home/a255372639/projects/MambaMIL-main
 
 DATA_ROOT="/home/a255372639/TCGA-LUAD/LUAD_example"
 RESULTS_DIR="./experiments/train/IHG_ps50_K2.5_BRPool_esfix"
-LOG_DIR="./logs"
-mkdir -p $RESULTS_DIR $LOG_DIR
+mkdir -p $RESULTS_DIR
 
 echo "=========================================="
-echo "  IHG-Mamba BRPool - START"
+echo "  IHG-Mamba BRPool (Hilbert sorted) - START"
 echo "  pool_mode=residual, K=2.5, gamma=0.0"
+echo "  features: use_hilbert_index (online reorder)"
+echo "  GPU: $CUDA_VISIBLE_DEVICES"
 echo "  $(date)"
 echo "=========================================="
 
@@ -59,7 +60,8 @@ python main_survival.py \
     --pool_mode residual \
     --tau_init 2.0 \
     --gamma_init 0.0 \
-    --features_already_hilbert \
+    --features_not_hilbert \
+    --use_hilbert_index \
     --es_warmup 0 \
     --es_patience 10 \
     --es_stop_epoch 10

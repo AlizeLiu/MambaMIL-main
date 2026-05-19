@@ -262,6 +262,22 @@ def train(datasets: tuple, cur: int, args: Namespace):
         split.features_already_hilbert = args.features_already_hilbert
         split.use_random_sampling = args.use_random_sampling
         split.num_eval_views = args.num_eval_views
+        split.feature_subdir = args.feature_subdir
+        split.sampling_mode = args.sampling_mode
+        split.chunk_size = args.chunk_size
+        split.eval_chunk_strategy = args.eval_chunk_strategy
+
+    # 打印采样配置
+    print(f"[Sampling] mode={args.sampling_mode}, max_seq_len={args.max_seq_len}, "
+          f"chunk_size={args.chunk_size}, eval_strategy={args.eval_chunk_strategy}")
+
+    if args.sampling_mode == 'chunk' and args.chunk_size != args.pool_size:
+        print(f"[WARNING] chunk_size({args.chunk_size}) != pool_size({args.pool_size}). "
+              f"Pool windows may cross chunk boundaries.")
+
+    if args.sampling_mode == 'chunk' and not args.features_already_hilbert and not args.use_hilbert_index:
+        print("[WARNING] chunk sampling assumes Hilbert-ordered features. "
+              "Current features may not be Hilbert sorted.")
 
     if args.num_eval_views > 1:
         print("[WARNING] num_eval_views > 1 is currently not implemented in "

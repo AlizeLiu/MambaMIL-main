@@ -14,6 +14,97 @@ from sklearn.preprocessing import StandardScaler
 import torch
 from torch.utils.data import Dataset
 
+
+def hilbert_chunk_sample_indices(
+    n: int,
+    max_seq_len: int,
+    chunk_size: int,
+    training: bool = True,
+    eval_strategy: str = 'center',
+) -> torch.LongTensor:
+    """Hilbert contiguous chunk sampling.
+
+    从 Hilbert 排序后的完整序列 [0, n) 中抽取多个连续小块，
+    每个块内部保持 Hilbert 局部连续性，总长度为 max_seq_len。
+
+    Args:
+        n: 完整 Hilbert 序列长度
+        max_seq_len: 目标采样长度
+        chunk_size: 每个连续块的 token 数
+        training: True=随机选块起点, False=按 eval_strategy 选择
+        eval_strategy: 'center' (确定性) 或 'random'
+
+    Returns:
+        indices: torch.LongTensor, 长度 ≤ max_seq_len, 按 Hilbert 顺序排列
+    """
+    if max_seq_len is None or max_seq_len <= 0 or n <= max_seq_len:
+        return torch.arange(n, dtype=torch.long)
+
+    if chunk_size <= 0:
+        raise ValueError("chunk_size must be positive")
+
+    num_full_chunks = max_seq_len // chunk_size
+    remainder = max_seq_len % chunk_size
+
+    chunk_sizes = [chunk_size] * num_full_chunks
+    if remainder > 0:
+        chunk_sizes.append(remainder)
+
+    num_chunks = len(chunk_sizes)
+    if num_chunks == 0:
+        chunk_sizes = [max_seq_len]
+        num_chunks = 1
+
+    # 将 [0, n) 均分成 num_chunks 个大区间
+    edges = torch.linspace(0, n, steps=num_chunks + 1).long()
+    chunks = []
+
+    for i, cur_chunk_size in enumerate(chunk_sizes):
+        start = int(edges[i].item())
+        end = int(edges[i + 1].item())
+        seg_len = end - start
+
+        if seg_len <= 0:
+            continue
+
+        cur_chunk_size = min(cur_chunk_size, seg_len)
+
+        if seg_len <= cur_chunk_size:
+            # 区间比 chunk 还小，直接取整个区间
+            offset = start
+        else:
+            if training:
+                offset = torch.randint(
+                    low=start,
+                    high=end - cur_chunk_size + 1,
+                    size=(1,)
+                ).item()
+            else:
+                if eval_strategy == 'center':
+                    offset = start + (seg_len - cur_chunk_size) // 2
+                elif eval_strategy == 'random':
+                    offset = torch.randint(
+                        low=start,
+                        high=end - cur_chunk_size + 1,
+                        size=(1,)
+                    ).item()
+                else:
+                    raise ValueError(f"Unknown eval_strategy: {eval_strategy}")
+
+        idx = torch.arange(offset, offset + cur_chunk_size, dtype=torch.long)
+        chunks.append(idx)
+
+    if len(chunks) == 0:
+        return torch.arange(min(n, max_seq_len), dtype=torch.long)
+
+    indices = torch.cat(chunks, dim=0)
+
+    # 截断到 max_seq_len
+    if indices.numel() > max_seq_len:
+        indices = indices[:max_seq_len]
+
+    return indices.long()
+
 from utils.utils import generate_split, nth
 
 
@@ -396,8 +487,9 @@ class Generic_MIL_Survival_Dataset(Generic_WSI_Survival_Dataset):
                 if self.mode == 'path':
                     path_features = []
                     for slide_id in slide_ids:
-                        # 1. 精准指向特征文件 (强制读取 pt_files 文件夹)
-                        wsi_path = os.path.join(data_dir, 'pt_files', f'{slide_id}.pt')
+                        # 1. 精准指向特征文件
+                        feature_subdir = getattr(self, 'feature_subdir', 'pt_files')
+                        wsi_path = os.path.join(data_dir, feature_subdir, f'{slide_id}.pt')
 
                         if not os.path.exists(wsi_path):
                             print(f"[Error] 找不到特征文件: {wsi_path}")
@@ -429,20 +521,37 @@ class Generic_MIL_Survival_Dataset(Generic_WSI_Survival_Dataset):
                         # ===== 防 OOM: 限制最大序列长度 =====
                         max_seq_len = getattr(self, 'max_seq_len', 2500)
                         use_random_sampling = getattr(self, 'use_random_sampling', True)
+                        sampling_mode = getattr(self, 'sampling_mode', 'random_points')
+                        chunk_size = getattr(self, 'chunk_size', 50)
+                        eval_chunk_strategy = getattr(self, 'eval_chunk_strategy', 'center')
 
                         if max_seq_len is not None and max_seq_len > 0 and wsi_bag.shape[0] > max_seq_len:
                             orig_len = wsi_bag.shape[0]
 
-                            if self.training_mode and use_random_sampling:
-                                # 训练模式：随机采样（每 epoch 不同，instance-level augmentation）
-                                indices = torch.randperm(orig_len)[:max_seq_len]
-                                indices, _ = indices.sort()
-                            else:
-                                # 验证模式：均匀降采样（固定，保证评估一致性）
+                            if sampling_mode == 'chunk':
+                                indices = hilbert_chunk_sample_indices(
+                                    n=orig_len,
+                                    max_seq_len=max_seq_len,
+                                    chunk_size=chunk_size,
+                                    training=self.training_mode,
+                                    eval_strategy=eval_chunk_strategy,
+                                )
+
+                            elif sampling_mode == 'random_points':
+                                if self.training_mode and use_random_sampling:
+                                    indices = torch.randperm(orig_len)[:max_seq_len]
+                                    indices, _ = indices.sort()
+                                else:
+                                    indices = torch.linspace(0, orig_len - 1, max_seq_len).long()
+
+                            elif sampling_mode == 'uniform_points':
                                 indices = torch.linspace(0, orig_len - 1, max_seq_len).long()
 
+                            else:
+                                raise ValueError(f"Unknown sampling_mode: {sampling_mode}")
+
                             wsi_bag = wsi_bag[indices]
-                            print(f"[Subsample] {slide_id}: {orig_len} -> {wsi_bag.shape[0]}")
+                            print(f"[Subsample] {slide_id}: {orig_len} -> {wsi_bag.shape[0]} (mode={sampling_mode})")
 
                         path_features.append(wsi_bag)
 
@@ -480,6 +589,10 @@ class Generic_Split(Generic_MIL_Survival_Dataset):
         self.features_already_hilbert = True
         self.use_random_sampling = True
         self.num_eval_views = 1
+        self.feature_subdir = 'pt_files'
+        self.sampling_mode = 'random_points'
+        self.chunk_size = 50
+        self.eval_chunk_strategy = 'center'
         #! add from HIPT
         # cluster_dir = "/".join(data_dir.split("/")[0:-1])
         # if os.path.isfile(os.path.join(cluster_dir, 'fast_cluster_ids.pkl')):

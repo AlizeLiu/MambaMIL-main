@@ -128,6 +128,16 @@ def main(args):
 parser = argparse.ArgumentParser(description='Configurations for WSI Training')
 parser.add_argument('--data_root_dir', type=str, default=None, 
                     help='Data directory to WSI features (extracted via CLAM)')
+parser.add_argument('--feature_subdir', type=str, default='pt_files',
+                    help='subdirectory under data_root_dir for pt features (default: pt_files)')
+parser.add_argument('--sampling_mode', type=str, default='random_points',
+                    choices=['random_points', 'uniform_points', 'chunk'],
+                    help='Patch sampling mode: random_points, uniform_points, or Hilbert contiguous chunk')
+parser.add_argument('--chunk_size', type=int, default=50,
+                    help='Number of contiguous Hilbert tokens per sampled chunk (default: 50)')
+parser.add_argument('--eval_chunk_strategy', type=str, default='center',
+                    choices=['center', 'random'],
+                    help='Chunk sampling strategy in validation: center (deterministic) or random')
 parser.add_argument('--max_epochs', type=int, default=200,
                     help='maximum number of epochs to train (default: 200)')
 parser.add_argument('--lr', type=float, default=1e-4,
@@ -339,6 +349,10 @@ settings.update({
     'patch_size': args.patch_size,
     'csv_path': args.csv_path,
     'data_root_dir': args.data_root_dir,
+    'feature_subdir': args.feature_subdir,
+    'sampling_mode': args.sampling_mode,
+    'chunk_size': args.chunk_size,
+    'eval_chunk_strategy': args.eval_chunk_strategy,
     'batch_size': args.batch_size,
 })
 

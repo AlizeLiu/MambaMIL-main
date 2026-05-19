@@ -53,7 +53,8 @@
     53|    --diffusion_steps 2 \
     54|    --K_init 0.5 \
     55|    --atp_dt 0.1 \
-    56|    --features_already_hilbert \
+    56|    --features_not_hilbert \
+    --use_hilbert_index \
     57|    --es_warmup 5 \
     58|    --es_patience 5 \
     59|    --es_stop_epoch 5
