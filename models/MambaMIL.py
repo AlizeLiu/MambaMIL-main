@@ -177,6 +177,8 @@ class MambaMIL(nn.Module):
             # Pad to segment boundary if needed
             pad_len = (seg_size - L % seg_size) % seg_size
             if pad_len > 0:
+                print(f"[WARNING] Segment-wise Local Mamba applied padding: {L} -> {L + pad_len}. "
+                      f"Padding tokens are not masked.")
                 h = F.pad(h.transpose(1, 2), (0, pad_len), mode='replicate').transpose(1, 2).contiguous()
                 B, L, D = h.shape
 
