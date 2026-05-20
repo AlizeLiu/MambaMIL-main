@@ -518,6 +518,17 @@ class Generic_MIL_Survival_Dataset(Generic_WSI_Survival_Dataset):
                             wsi_bag = wsi_bag[hilbert_idx]
                             print(f"\n✅ [IHG-Mamba] Hilbert 重排 {slide_id}: {wsi_bag.shape}")
 
+                        # ===== order_mode: 固定随机 permutation (顺序负对照) =====
+                        order_mode = getattr(self, 'order_mode', 'keep')
+                        if order_mode == 'random_perm':
+                            base_seed = getattr(self, 'seed', 1)
+                            import hashlib
+                            h = int(hashlib.md5(slide_id.encode()).hexdigest(), 16) % (2**31)
+                            g = torch.Generator()
+                            g.manual_seed(base_seed + h)
+                            perm = torch.randperm(wsi_bag.shape[0], generator=g)
+                            wsi_bag = wsi_bag[perm]
+
                         # ===== 防 OOM: 限制最大序列长度 =====
                         max_seq_len = getattr(self, 'max_seq_len', 2500)
                         use_random_sampling = getattr(self, 'use_random_sampling', True)
@@ -593,6 +604,8 @@ class Generic_Split(Generic_MIL_Survival_Dataset):
         self.sampling_mode = 'random_points'
         self.chunk_size = 50
         self.eval_chunk_strategy = 'center'
+        self.order_mode = 'keep'
+        self.seed = 1
         #! add from HIPT
         # cluster_dir = "/".join(data_dir.split("/")[0:-1])
         # if os.path.isfile(os.path.join(cluster_dir, 'fast_cluster_ids.pkl')):

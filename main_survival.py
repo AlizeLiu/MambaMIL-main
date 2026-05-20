@@ -138,6 +138,14 @@ parser.add_argument('--chunk_size', type=int, default=50,
 parser.add_argument('--eval_chunk_strategy', type=str, default='center',
                     choices=['center', 'random'],
                     help='Chunk sampling strategy in validation: center (deterministic) or random')
+parser.add_argument('--order_mode', type=str, default='keep',
+                    choices=['keep', 'random_perm'],
+                    help='Feature order control: keep (preserve) or random_perm (fixed shuffle, negative control)')
+parser.add_argument('--local_segment_mode', type=str, default='none',
+                    choices=['none', 'chunk'],
+                    help='Segment-wise Local Mamba: none (flat) or chunk (independent per chunk)')
+parser.add_argument('--local_segment_size', type=int, default=50,
+                    help='Segment size for segment-wise Local Mamba (usually = chunk_size = pool_size)')
 parser.add_argument('--max_epochs', type=int, default=200,
                     help='maximum number of epochs to train (default: 200)')
 parser.add_argument('--lr', type=float, default=1e-4,
@@ -353,6 +361,9 @@ settings.update({
     'sampling_mode': args.sampling_mode,
     'chunk_size': args.chunk_size,
     'eval_chunk_strategy': args.eval_chunk_strategy,
+    'order_mode': args.order_mode,
+    'local_segment_mode': args.local_segment_mode,
+    'local_segment_size': args.local_segment_size,
     'batch_size': args.batch_size,
 })
 

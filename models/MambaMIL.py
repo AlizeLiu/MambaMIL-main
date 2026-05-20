@@ -44,6 +44,8 @@ class MambaMIL(nn.Module):
         pool_mode='diffusion',
         tau_init=2.0,
         gamma_init=0.0,
+        local_segment_mode='none',
+        local_segment_size=50,
     ):
         super(MambaMIL, self).__init__()
 
@@ -53,6 +55,12 @@ class MambaMIL(nn.Module):
         self.type = type
         self.use_atp_pool = use_atp_pool
         self.n_classes = n_classes
+        self.local_segment_mode = local_segment_mode
+        self.local_segment_size = local_segment_size
+
+        # Validation
+        if local_segment_mode == "chunk" and pool_size > local_segment_size:
+            raise ValueError(f"pool_size({pool_size}) > local_segment_size({local_segment_size}) is not allowed.")
 
         # 兼容旧参数：如果没有单独传 local/global，就用 layer
         if local_layers is None:
@@ -161,15 +169,47 @@ class MambaMIL(nn.Module):
 
         h = self._fc1(h)  # [B, N, hidden_dim]
 
-        # Phase 1: Local Mamba (micro-environment modeling)
-        for layer in self.local_layers:
-            h_ = h
-            h = layer[0](h)
-            h = layer[1](h, rate=self.rate) if self.type == "SRMamba" else layer[1](h)
-            h = h + h_
+        if self.local_segment_mode == 'chunk':
+            # ===== Segment-wise Local Mamba =====
+            B, L, D = h.shape
+            seg_size = self.local_segment_size
 
-        # ATP-Pool: compress sequence length
-        h = self.atp_pool(h)  # [B, N // pool_size, hidden_dim] or Identity
+            # Pad to segment boundary if needed
+            pad_len = (seg_size - L % seg_size) % seg_size
+            if pad_len > 0:
+                h = F.pad(h.transpose(1, 2), (0, pad_len), mode='replicate').transpose(1, 2).contiguous()
+                B, L, D = h.shape
+
+            S = L // seg_size
+
+            # Reshape: [B, L, D] -> [B*S, seg_size, D]
+            h_seg = h.reshape(B, S, seg_size, D)
+            h_seg = h_seg.reshape(B * S, seg_size, D)
+
+            # Local Mamba independently per segment
+            for layer in self.local_layers:
+                h_ = h_seg
+                h_seg = layer[0](h_seg)
+                h_seg = layer[1](h_seg, rate=self.rate) if self.type == "SRMamba" else layer[1](h_seg)
+                h_seg = h_seg + h_
+
+            # ATPPool per segment: [B*S, seg_size, D] -> [B*S, seg_size//pool_size, D]
+            pooled_seg = self.atp_pool(h_seg)
+
+            # Reshape back: [B, S * pooled_per_seg, D]
+            pooled_per_seg = pooled_seg.shape[1]
+            h = pooled_seg.reshape(B, S * pooled_per_seg, D)
+
+        else:
+            # ===== Flat Local Mamba (original) =====
+            for layer in self.local_layers:
+                h_ = h
+                h = layer[0](h)
+                h = layer[1](h, rate=self.rate) if self.type == "SRMamba" else layer[1](h)
+                h = h + h_
+
+            # ATP-Pool: compress sequence length
+            h = self.atp_pool(h)  # [B, N // pool_size, hidden_dim] or Identity
 
         # Phase 2: Global Mamba (macro-context modeling)
         for layer in self.global_layers:

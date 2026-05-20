@@ -237,6 +237,8 @@ def train(datasets: tuple, cur: int, args: Namespace):
             pool_mode=args.pool_mode,
             tau_init=args.tau_init,
             gamma_init=args.gamma_init,
+            local_segment_mode=args.local_segment_mode,
+            local_segment_size=args.local_segment_size,
         )
     
     else:
@@ -266,10 +268,13 @@ def train(datasets: tuple, cur: int, args: Namespace):
         split.sampling_mode = args.sampling_mode
         split.chunk_size = args.chunk_size
         split.eval_chunk_strategy = args.eval_chunk_strategy
+        split.order_mode = args.order_mode
+        split.seed = args.seed
 
     # 打印采样配置
     print(f"[Sampling] mode={args.sampling_mode}, max_seq_len={args.max_seq_len}, "
-          f"chunk_size={args.chunk_size}, eval_strategy={args.eval_chunk_strategy}")
+          f"chunk_size={args.chunk_size}, eval_strategy={args.eval_chunk_strategy}, "
+          f"order_mode={args.order_mode}")
 
     if args.sampling_mode == 'chunk' and args.chunk_size != args.pool_size:
         print(f"[WARNING] chunk_size({args.chunk_size}) != pool_size({args.pool_size}). "
@@ -278,6 +283,19 @@ def train(datasets: tuple, cur: int, args: Namespace):
     if args.sampling_mode == 'chunk' and not args.features_already_hilbert and not args.use_hilbert_index:
         print("[WARNING] chunk sampling assumes Hilbert-ordered features. "
               "Current features may not be Hilbert sorted.")
+
+    # Segment-wise Local Mamba 配置
+    if args.local_segment_mode == 'chunk':
+        print(f"[Local Segment] Enabled segment-wise Local Mamba: "
+              f"segment_size={args.local_segment_size}, chunk_size={args.chunk_size}, pool_size={args.pool_size}")
+        if args.sampling_mode != 'chunk':
+            print(f"[WARNING] local_segment_mode=chunk is intended for sampling_mode=chunk. "
+                  f"Current sampling_mode={args.sampling_mode}")
+        if args.local_segment_size != args.chunk_size:
+            print(f"[WARNING] local_segment_size({args.local_segment_size}) != chunk_size({args.chunk_size}). "
+                  f"Segment boundaries may not match sampled chunks.")
+        if args.pool_size > args.local_segment_size:
+            raise ValueError(f"pool_size({args.pool_size}) > local_segment_size({args.local_segment_size}) is not allowed.")
 
     if args.num_eval_views > 1:
         print("[WARNING] num_eval_views > 1 is currently not implemented in "
