@@ -144,7 +144,30 @@ def train(datasets, cur, args):
         model = S4Model(in_dim = args.in_dim, n_classes = args.n_classes, act = 'gelu', dropout = args.drop_out)
     elif args.model_type == 'mamba_mil':
         from models.MambaMIL import MambaMIL
-        model = MambaMIL(in_dim = args.in_dim, n_classes=args.n_classes, dropout=args.drop_out, act='gelu', layer = args.mambamil_layer, rate = args.mambamil_rate, type = args.mambamil_type)
+        model = MambaMIL(
+            in_dim=args.in_dim,
+            n_classes=args.n_classes,
+            dropout=args.drop_out,
+            act='gelu',
+            survival=False,
+            layer=args.mambamil_layer,
+            rate=args.mambamil_rate,
+            type=args.mambamil_type,
+            hidden_dim=args.hidden_dim,
+            local_layers=args.local_layers,
+            global_layers=args.global_layers,
+            pool_size=args.pool_size,
+            use_atp_pool=args.use_atp_pool,
+            diffusion_steps=args.diffusion_steps,
+            K_init=args.K_init,
+            atp_dt=args.atp_dt,
+            norm_type=args.norm_type,
+            pool_mode=args.pool_mode,
+            tau_init=args.tau_init,
+            gamma_init=args.gamma_init,
+            local_segment_mode=args.local_segment_mode,
+            local_segment_size=args.local_segment_size,
+        )
     else:
         raise NotImplementedError(f'{args.model_type} is not implemented ...')
 
@@ -158,6 +181,49 @@ def train(datasets, cur, args):
     print('Done!')
     
     print('\nInit Loaders...', end=' ')
+    # Set IHG-Mamba dataset parameters on all splits
+    for split in [train_split, val_split, test_split]:
+        split.max_seq_len = args.max_seq_len
+        split.feature_subdir = args.feature_subdir
+        split.features_already_hilbert = args.features_already_hilbert
+        split.use_hilbert_index = args.use_hilbert_index
+        split.hilbert_index_dir = args.hilbert_index_dir
+        split.sampling_mode = args.sampling_mode
+        split.chunk_size = args.chunk_size
+        split.eval_chunk_strategy = args.eval_chunk_strategy
+        split.order_mode = args.order_mode
+        split.order_seed = args.order_seed
+        split.use_random_sampling = args.use_random_sampling
+    train_split.training_mode = True
+    val_split.training_mode = False
+    test_split.training_mode = False
+
+    # Print sampling configuration
+    print(f"[Sampling] mode={args.sampling_mode}, max_seq_len={args.max_seq_len}, "
+          f"chunk_size={args.chunk_size}, eval_strategy={args.eval_chunk_strategy}, "
+          f"order_mode={args.order_mode}")
+
+    if args.sampling_mode == 'chunk' and args.chunk_size != args.pool_size:
+        print(f"[WARNING] chunk_size({args.chunk_size}) != pool_size({args.pool_size}). "
+              f"Pool windows may cross chunk boundaries.")
+
+    if args.sampling_mode == 'chunk' and not args.features_already_hilbert and not args.use_hilbert_index:
+        print("[WARNING] chunk sampling assumes Hilbert-ordered features. "
+              "Current features may not be Hilbert sorted.")
+
+    # Segment-wise Local Mamba configuration
+    if args.local_segment_mode == 'chunk':
+        print(f"[Local Segment] Enabled segment-wise Local Mamba: "
+              f"segment_size={args.local_segment_size}, chunk_size={args.chunk_size}, pool_size={args.pool_size}")
+        if args.sampling_mode != 'chunk':
+            print(f"[WARNING] local_segment_mode=chunk is intended for sampling_mode=chunk. "
+                  f"Current sampling_mode={args.sampling_mode}")
+        if args.local_segment_size != args.chunk_size:
+            print(f"[WARNING] local_segment_size({args.local_segment_size}) != chunk_size({args.chunk_size}). "
+                  f"Segment boundaries may not match sampled chunks.")
+        if args.pool_size > args.local_segment_size:
+            raise ValueError(f"pool_size({args.pool_size}) > local_segment_size({args.local_segment_size}) is not allowed.")
+
     train_loader = get_split_loader(train_split, training=True, testing = args.testing, weighted = args.weighted_sample)
     val_loader = get_split_loader(val_split,  testing = args.testing)
     test_loader = get_split_loader(test_split, testing = args.testing)
@@ -165,7 +231,7 @@ def train(datasets, cur, args):
 
     print('\nSetup EarlyStopping...', end=' ')
     if args.early_stopping:
-        early_stopping = EarlyStopping(patience = 20, stop_epoch=50, verbose = True)
+        early_stopping = EarlyStopping(patience=args.es_patience, stop_epoch=args.es_stop_epoch, verbose=True)
 
     else:
         early_stopping = None

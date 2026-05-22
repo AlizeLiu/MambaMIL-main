@@ -140,8 +140,87 @@ parser.add_argument('--mambamil_type',type=str, default='SRMamba', choices= ['Ma
 # 允许外部传入 csv 路径
 parser.add_argument('--csv_path', type=str, default=None, help='path to the dataset csv file')
 
+## IHG-Mamba architecture params
+
+parser.add_argument('--hidden_dim', type=int, default=256,
+                    help='hidden dimension for IHG-Mamba')
+parser.add_argument('--max_seq_len', type=int, default=2500,
+                    help='maximum number of patches per WSI; <=0 means no truncation')
+parser.add_argument('--feature_subdir', type=str, default='pt_files',
+                    help='subdirectory under data_root_dir for pt features (default: pt_files)')
+parser.add_argument('--features_already_hilbert', dest='features_already_hilbert',
+                    action='store_true', default=False,
+                    help='input .pt features are already Hilbert ordered')
+parser.add_argument('--features_not_hilbert', dest='features_already_hilbert',
+                    action='store_false',
+                    help='input .pt features are NOT Hilbert ordered (use with --use_hilbert_index)')
+parser.add_argument('--use_hilbert_index', action='store_true', default=False,
+                    help='load hilbert/*.pt index and reorder features inside DataLoader')
+parser.add_argument('--hilbert_index_dir', type=str, default=None,
+                    help='directory containing hilbert index files (default: None, uses data_dir/hilbert)')
+parser.add_argument('--sampling_mode', type=str, default='random_points',
+                    choices=['random_points', 'uniform_points', 'chunk'],
+                    help='Patch sampling mode: random_points, uniform_points, or Hilbert contiguous chunk')
+parser.add_argument('--chunk_size', type=int, default=50,
+                    help='Number of contiguous Hilbert tokens per sampled chunk (default: 50)')
+parser.add_argument('--eval_chunk_strategy', type=str, default='center',
+                    choices=['center', 'random'],
+                    help='Chunk sampling strategy in validation: center (deterministic) or random')
+parser.add_argument('--order_mode', type=str, default='keep',
+                    choices=['keep', 'random_perm'],
+                    help='Feature order control: keep (preserve) or random_perm (fixed shuffle, negative control)')
+parser.add_argument('--order_seed', type=int, default=1,
+                    help='base seed for deterministic random_perm ordering (default: 1)')
+parser.add_argument('--pool_size', type=int, default=50,
+                    help='pooling window size for ATP-Pool')
+parser.add_argument('--pool_mode', type=str, default='avg',
+                    choices=['avg', 'diffusion', 'residual'],
+                    help='ATPPool mode: avg (plain), diffusion (PM diffusion), residual (boundary residual)')
+parser.add_argument('--diffusion_steps', type=int, default=0,
+                    help='anisotropic diffusion steps in ATP-Pool (0=disable diffusion but keep avg_pool)')
+parser.add_argument('--K_init', type=float, default=2.5,
+                    help='initial boundary conductance threshold K in ATP-Pool')
+parser.add_argument('--atp_dt', type=float, default=0.1,
+                    help='diffusion step size in ATP-Pool')
+parser.add_argument('--norm_type', type=str, default='mean', choices=['mean', 'sum'],
+                    help='norm type for gradient in ATP-Pool: mean (scale-stable) or sum (L2)')
+parser.add_argument('--tau_init', type=float, default=2.0,
+                    help='initial temperature for boundary residual pooling')
+parser.add_argument('--gamma_init', type=float, default=0.0,
+                    help='initial raw gamma for boundary residual pooling; 0 means avg pooling at init')
+parser.add_argument('--local_layers', type=int, default=1,
+                    help='number of local Mamba layers')
+parser.add_argument('--global_layers', type=int, default=1,
+                    help='number of global Mamba layers')
+parser.add_argument('--local_segment_mode', type=str, default='none',
+                    choices=['none', 'chunk'],
+                    help='Segment-wise Local Mamba: none (flat) or chunk (independent per chunk)')
+parser.add_argument('--local_segment_size', type=int, default=50,
+                    help='Segment size for segment-wise Local Mamba (usually = chunk_size = pool_size)')
+parser.add_argument('--disable_atp_pool', action='store_true', default=False,
+                    help='completely remove ATP-Pool (NOT same as diffusion_steps=0)')
+parser.add_argument('--disable_random_sampling', action='store_true', default=False,
+                    help='disable random sampling and use deterministic sampling')
+
+## Early stopping params
+
+parser.add_argument('--es_patience', type=int, default=20,
+                    help='early stopping patience')
+parser.add_argument('--es_stop_epoch', type=int, default=50,
+                    help='earliest epoch possible for stopping')
+parser.add_argument('--batch_size', type=int, default=1,
+                    help='batch size (only batch_size=1 supported)')
+
 
 args = parser.parse_args()
+
+# Compute derived parameters
+args.use_atp_pool = not args.disable_atp_pool
+args.use_random_sampling = not args.disable_random_sampling
+
+# Current MIL classification pipeline only supports batch_size=1
+assert args.batch_size == 1, f"Current MIL pipeline only supports batch_size=1, got {args.batch_size}"
+
 device=torch.device("cuda" if torch.cuda.is_available() else "cpu")
 print('Deviece is:', device)
 
@@ -175,6 +254,45 @@ settings = {'num_splits': args.k,
             "use_drop_out": args.drop_out,
             'weighted_sample': args.weighted_sample,
             'opt': args.opt}
+
+# IHG-Mamba full parameter logging
+settings.update({
+    'hidden_dim': args.hidden_dim,
+    'max_seq_len': args.max_seq_len,
+    'pool_size': args.pool_size,
+    'local_layers': args.local_layers,
+    'global_layers': args.global_layers,
+    'diffusion_steps': args.diffusion_steps,
+    'K_init': args.K_init,
+    'atp_dt': args.atp_dt,
+    'norm_type': args.norm_type,
+    'pool_mode': args.pool_mode,
+    'tau_init': args.tau_init,
+    'gamma_init': args.gamma_init,
+    'use_atp_pool': args.use_atp_pool,
+    'features_already_hilbert': args.features_already_hilbert,
+    'use_hilbert_index': args.use_hilbert_index,
+    'disable_random_sampling': args.disable_random_sampling,
+    'es_patience': args.es_patience,
+    'es_stop_epoch': args.es_stop_epoch,
+    'mambamil_type': args.mambamil_type,
+    'mambamil_rate': args.mambamil_rate,
+    'mambamil_layer': args.mambamil_layer,
+    'in_dim': args.in_dim,
+    'preloading': args.preloading,
+    'backbone': args.backbone,
+    'patch_size': args.patch_size,
+    'csv_path': args.csv_path,
+    'data_root_dir': args.data_root_dir,
+    'feature_subdir': args.feature_subdir,
+    'sampling_mode': args.sampling_mode,
+    'chunk_size': args.chunk_size,
+    'eval_chunk_strategy': args.eval_chunk_strategy,
+    'order_mode': args.order_mode,
+    'local_segment_mode': args.local_segment_mode,
+    'local_segment_size': args.local_segment_size,
+    'batch_size': args.batch_size,
+})
 
 
 print('\nLoad Dataset')

@@ -10,6 +10,12 @@ import h5py
 
 from utils.utils import generate_split, nth
 
+# IHG-Mamba: import Hilbert chunk sampling from survival dataset
+try:
+    from dataset.dataset_survival import hilbert_chunk_sample_indices
+except ImportError:
+    hilbert_chunk_sample_indices = None
+
 def save_splits(split_datasets, column_keys, filename, boolean_style=False):
 	splits = [split_datasets[i].slide_data['slide_id'] for i in range(len(split_datasets))]
 	if not boolean_style:
@@ -334,61 +340,117 @@ class Generic_MIL_Dataset(Generic_WSI_Classification_Dataset):
 	def load_from_h5(self, toggle):
 		self.use_h5 = toggle
 
-
-def __getitem__(self, idx):
-	slide_id = self.slide_data['slide_id'][idx]
-	label = self.slide_data['label'][idx]
-	if type(self.data_dir) == dict:
-		source = self.slide_data['source'][idx]
-		data_dir = self.data_dir[source]
-	elif self.data_dir is None:
-		data_dir = self.slide_data['dir'][idx]
-	else:
-		data_dir = self.data_dir
-
-	if not self.use_h5:
-		if self.patch_size == '512':
-			full_path = os.path.join(data_dir, 'pt_files', self.backbone, '{}.pt'.format(slide_id))
+	def __getitem__(self, idx):
+		slide_id = self.slide_data['slide_id'][idx]
+		label = self.slide_data['label'][idx]
+		if type(self.data_dir) == dict:
+			source = self.slide_data['source'][idx]
+			data_dir = self.data_dir[source]
+		elif self.data_dir is None:
+			data_dir = self.slide_data['dir'][idx]
 		else:
-			full_path = os.path.join(data_dir, self.patch_size, 'pt_files', self.backbone, '{}.pt'.format(slide_id))
+			data_dir = self.data_dir
 
-		if full_path in self.data_cache.keys():
-			features = self.data_cache[full_path]
-		else:
-			features = torch.load(full_path)
-			if hasattr(Generic_Split, 'cache_flag') and self.cache_flag:
-				self.data_cache[full_path] = features
-
-		# ==========================================
-		# 🌟 IHG-Mamba 核心创新：Hilbert 2D-1D 空间拓扑重排 (亚型分类版)
-		# ==========================================
-		slide_id_clean = slide_id.replace('.pt', '') if isinstance(slide_id, str) and slide_id.endswith('.pt') else str(
-			slide_id)
-		try:
-			hilbert_dir = os.path.join(os.path.dirname(data_dir), 'hilbert')
-			hilbert_path = os.path.join(hilbert_dir, f"{slide_id_clean}_hilbert.pt")
-
-			if os.path.exists(hilbert_path):
-				hilbert_idx = torch.load(hilbert_path)
-				features = features[hilbert_idx]
-				print(
-					f"\n✅ [亚型分类 - IHG-Mamba] 成功为切片 {slide_id_clean} 应用 Hilbert 排序! 形状: {features.shape}")
+		if not self.use_h5:
+			feature_subdir = getattr(self, 'feature_subdir', 'pt_files')
+			if self.patch_size == '512':
+				full_path = os.path.join(data_dir, feature_subdir, self.backbone, '{}.pt'.format(slide_id))
 			else:
-				print(f"[Warning] 找不到索引文件 {hilbert_path}，使用无序特征")
-		except Exception as e:
-			print(f"[Warning] Hilbert 排序出错 {slide_id_clean}. 错误: {e}")
-		# ==========================================
+				full_path = os.path.join(data_dir, self.patch_size, feature_subdir, self.backbone, '{}.pt'.format(slide_id))
 
-		return features, label
+			if full_path in self.data_cache.keys():
+				features = self.data_cache[full_path]
+			else:
+				features = torch.load(full_path)
+				if hasattr(Generic_Split, 'cache_flag') and self.cache_flag:
+					self.data_cache[full_path] = features
 
-	else:
-		full_path = os.path.join(data_dir, 'h5_files', '{}.h5'.format(slide_id))
-		with h5py.File(full_path, 'r') as hdf5_file:
-			features = hdf5_file['features'][:]
-			coords = hdf5_file['coords'][:]
+			# ==========================================
+			# IHG-Mamba: Hilbert spatial topology reorder (classification path)
+			# ==========================================
+			use_hilbert_index = getattr(self, 'use_hilbert_index', False)
+			features_already_hilbert = getattr(self, 'features_already_hilbert', False)
+			hilbert_index_dir = getattr(self, 'hilbert_index_dir', None)
 
-		features = torch.from_numpy(features)
-		return features, label, coords
+			if use_hilbert_index and not features_already_hilbert:
+				if hilbert_index_dir is not None:
+					hilbert_dir = hilbert_index_dir
+				else:
+					hilbert_dir = os.path.join(data_dir, 'hilbert')
+				slide_id_clean = slide_id.replace('.pt', '') if isinstance(slide_id, str) and slide_id.endswith('.pt') else str(slide_id)
+				hilbert_path = os.path.join(hilbert_dir, f"{slide_id_clean}_hilbert.pt")
+
+				if not os.path.exists(hilbert_path):
+					raise FileNotFoundError(f"Missing Hilbert index: {hilbert_path}")
+
+				hilbert_idx = torch.load(hilbert_path).long()
+				if hilbert_idx.numel() != features.shape[0]:
+					raise RuntimeError(
+						f"Hilbert index length mismatch for {slide_id}: "
+						f"idx={hilbert_idx.numel()}, feature={features.shape[0]}"
+					)
+				features = features[hilbert_idx]
+				print(f"\n[IHG-Mamba] Hilbert reorder {slide_id}: {features.shape}")
+
+			# ===== Subsample to max_seq_len =====
+			max_seq_len = getattr(self, 'max_seq_len', 2500)
+			use_random_sampling = getattr(self, 'use_random_sampling', True)
+			sampling_mode = getattr(self, 'sampling_mode', 'random_points')
+			chunk_size = getattr(self, 'chunk_size', 50)
+			eval_chunk_strategy = getattr(self, 'eval_chunk_strategy', 'center')
+			training_mode = getattr(self, 'training_mode', False)
+
+			if max_seq_len is not None and max_seq_len > 0 and features.shape[0] > max_seq_len:
+				orig_len = features.shape[0]
+
+				if sampling_mode == 'chunk':
+					if hilbert_chunk_sample_indices is None:
+						raise ImportError("hilbert_chunk_sample_indices not available from dataset.dataset_survival")
+					indices = hilbert_chunk_sample_indices(
+						n=orig_len,
+						max_seq_len=max_seq_len,
+						chunk_size=chunk_size,
+						training=training_mode,
+						eval_strategy=eval_chunk_strategy,
+					)
+				elif sampling_mode == 'random_points':
+					if training_mode and use_random_sampling:
+						indices = torch.randperm(orig_len)[:max_seq_len]
+						indices, _ = indices.sort()
+					else:
+						indices = torch.linspace(0, orig_len - 1, max_seq_len).long()
+				elif sampling_mode == 'uniform_points':
+					indices = torch.linspace(0, orig_len - 1, max_seq_len).long()
+				else:
+					raise ValueError(f"Unknown sampling_mode: {sampling_mode}")
+
+				features = features[indices]
+				print(f"[Subsample] {slide_id}: {orig_len} -> {features.shape[0]} (mode={sampling_mode})")
+
+			# ===== order_mode: random permutation after sampling (negative control) =====
+			order_mode = getattr(self, 'order_mode', 'keep')
+			order_seed = getattr(self, 'order_seed', 1)
+			if order_mode == 'random_perm':
+				import hashlib
+				slide_id_str = str(slide_id)
+				h = int(hashlib.md5(slide_id_str.encode()).hexdigest(), 16) % (2**31)
+				g = torch.Generator()
+				g.manual_seed(order_seed + h)
+				perm = torch.randperm(features.shape[0], generator=g)
+				features = features[perm]
+
+			# ==========================================
+
+			return features, label
+
+		else:
+			full_path = os.path.join(data_dir, 'h5_files', '{}.h5'.format(slide_id))
+			with h5py.File(full_path, 'r') as hdf5_file:
+				features = hdf5_file['features'][:]
+				coords = hdf5_file['coords'][:]
+
+			features = torch.from_numpy(features)
+			return features, label, coords
 
 
 class Generic_Split(Generic_MIL_Dataset):
@@ -401,6 +463,20 @@ class Generic_Split(Generic_MIL_Dataset):
 		self.data_cache = {}
 		for i in range(self.num_classes):
 			self.slide_cls_ids[i] = np.where(self.slide_data['label'] == i)[0]
+
+		# IHG-Mamba parameter defaults (avoid attribute errors during preloading)
+		self.max_seq_len = 2500
+		self.feature_subdir = 'pt_files'
+		self.features_already_hilbert = False
+		self.use_hilbert_index = False
+		self.hilbert_index_dir = None
+		self.sampling_mode = 'random_points'
+		self.chunk_size = 50
+		self.eval_chunk_strategy = 'center'
+		self.order_mode = 'keep'
+		self.order_seed = 1
+		self.use_random_sampling = True
+		self.training_mode = False
 
 	def __len__(self):
 		return len(self.slide_data)
