@@ -239,6 +239,8 @@ def train(datasets: tuple, cur: int, args: Namespace):
             gamma_init=args.gamma_init,
             local_segment_mode=args.local_segment_mode,
             local_segment_size=args.local_segment_size,
+            attn_type=getattr(args, 'attn_type', 'simple'),
+            attn_dim=getattr(args, 'attn_dim', 128),
         )
     
     else:

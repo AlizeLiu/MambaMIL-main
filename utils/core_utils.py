@@ -6,6 +6,7 @@ from dataset.dataset_generic import save_splits
 from sklearn.preprocessing import label_binarize
 from sklearn.metrics import roc_auc_score, roc_curve
 from sklearn.metrics import auc as calc_auc
+from utils.eval_utils import save_fold_eval_artifacts, compute_binary_roc, plot_mean_roc
 import wandb
 
 def find_func(model_name: str):
@@ -167,6 +168,8 @@ def train(datasets, cur, args):
             gamma_init=args.gamma_init,
             local_segment_mode=args.local_segment_mode,
             local_segment_size=args.local_segment_size,
+            attn_type=getattr(args, 'attn_type', 'simple'),
+            attn_dim=getattr(args, 'attn_dim', 128),
         )
     else:
         raise NotImplementedError(f'{args.model_type} is not implemented ...')
@@ -255,8 +258,27 @@ def train(datasets, cur, args):
     _, val_error, val_auc, _= summary(model, val_loader, args.n_classes)
     print('Val error: {:.4f}, ROC AUC: {:.4f}'.format(val_error, val_auc))
 
-    results_dict, test_error, test_auc, acc_logger = summary(model, test_loader, args.n_classes)
+    results_dict, test_error, test_auc, acc_logger, test_raw = summary(model, test_loader, args.n_classes, return_raw=True)
     print('Test error: {:.4f}, ROC AUC: {:.4f}'.format(test_error, test_auc))
+
+    # Save eval artifacts if requested
+    if getattr(args, 'save_eval_artifacts', False):
+        val_raw = summary(model, val_loader, args.n_classes, return_raw=True)[4]
+        artifact_dir = getattr(args, 'eval_artifact_dir', None) or args.results_dir
+        
+        test_metrics = save_fold_eval_artifacts(
+            artifact_dir, cur, 'test',
+            test_raw['y_true'], test_raw['y_pred'], test_raw['y_prob'],
+            plot_roc_flag=getattr(args, 'plot_roc', False),
+            plot_confusion_flag=getattr(args, 'plot_confusion', False),
+        )
+        val_metrics = save_fold_eval_artifacts(
+            artifact_dir, cur, 'val',
+            val_raw['y_true'], val_raw['y_pred'], val_raw['y_prob'],
+            plot_roc_flag=getattr(args, 'plot_roc', False),
+            plot_confusion_flag=getattr(args, 'plot_confusion', False),
+        )
+        print(f'  Eval artifacts saved to {artifact_dir}/eval_artifacts/fold_{cur}/')
 
     for i in range(args.n_classes):
         acc, correct, count = acc_logger.get_summary(i)
@@ -385,7 +407,7 @@ def validate(cur, epoch, model, loader, n_classes, early_stopping = None, writer
 
 
 
-def summary(model, loader, n_classes):
+def summary(model, loader, n_classes, return_raw=False):
     device=torch.device("cuda" if torch.cuda.is_available() else "cpu")
     acc_logger = Accuracy_Logger(n_classes=n_classes)
     model.eval()
@@ -439,5 +461,12 @@ def summary(model, loader, n_classes):
 
         auc = np.nanmean(np.array(aucs))
 
+    if return_raw:
+        raw = {
+            'y_true': all_labels,
+            'y_pred': all_Y_hat,
+            'y_prob': all_probs,
+        }
+        return patient_results, test_error, auc, acc_logger, raw
 
     return patient_results, test_error, auc, acc_logger

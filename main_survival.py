@@ -263,6 +263,12 @@ parser.add_argument('--use_hilbert_index', action='store_true', default=False,
 parser.add_argument('--disable_random_sampling', action='store_true', default=False,
                     help='disable random sampling and use deterministic sampling')
 
+## Attention readout params
+parser.add_argument('--attn_type', type=str, default='simple', choices=['simple', 'gated'],
+                    help='attention readout type: simple (Linear->Tanh->Linear) or gated (V*U -> w)')
+parser.add_argument('--attn_dim', type=int, default=128,
+                    help='intermediate dimension for attention layers (default: 128)')
+
 parser.add_argument('--num_eval_views', type=int, default=1,
                     help='number of evaluation views for multiview risk averaging')
 
@@ -365,6 +371,8 @@ settings.update({
     'local_segment_mode': args.local_segment_mode,
     'local_segment_size': args.local_segment_size,
     'batch_size': args.batch_size,
+    'attn_type': args.attn_type,
+    'attn_dim': args.attn_dim,
 })
 
 

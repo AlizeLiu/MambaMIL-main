@@ -94,6 +94,28 @@ def main(args):
     wandb.log({"summary": table})
     wandb.log({"mean_auc_test": mean_auc_test, "mean_acc_test": mean_acc_test, "mean_auc_val": mean_auc_val, "mean_acc_val": mean_acc_val})
 
+    # Save mean ROC across folds if eval artifacts enabled
+    if getattr(args, 'save_eval_artifacts', False) and getattr(args, 'plot_roc', False):
+        from utils.eval_utils import compute_binary_roc, plot_mean_roc
+        artifact_dir = getattr(args, 'eval_artifact_dir', None) or args.results_dir
+        fold_fprs = []
+        fold_tprs = []
+        fold_aucs = []
+        for fold_idx in folds:
+            pred_csv = os.path.join(artifact_dir, 'eval_artifacts', f'fold_{fold_idx}', 'test_predictions.csv')
+            if os.path.exists(pred_csv):
+                pred_df = pd.read_csv(pred_csv)
+                y_true = pred_df['y_true'].values
+                y_prob = pred_df['prob_class_1'].values
+                fpr, tpr, _, auc = compute_binary_roc(y_true, y_prob)
+                fold_fprs.append(fpr)
+                fold_tprs.append(tpr)
+                fold_aucs.append(auc)
+        if fold_fprs:
+            mean_roc_path = os.path.join(artifact_dir, 'eval_artifacts', 'mean_roc.png')
+            plot_mean_roc(fold_fprs, fold_tprs, fold_aucs, mean_roc_path)
+            print(f'Mean ROC saved to {mean_roc_path}')
+
 
 # Generic training settings
 parser = argparse.ArgumentParser(description='Configurations for WSI Training')
@@ -202,6 +224,12 @@ parser.add_argument('--disable_atp_pool', action='store_true', default=False,
 parser.add_argument('--disable_random_sampling', action='store_true', default=False,
                     help='disable random sampling and use deterministic sampling')
 
+## Attention readout params
+parser.add_argument('--attn_type', type=str, default='simple', choices=['simple', 'gated'],
+                    help='attention readout type: simple (Linear->Tanh->Linear) or gated (V*U -> w)')
+parser.add_argument('--attn_dim', type=int, default=128,
+                    help='intermediate dimension for attention layers (default: 128)')
+
 ## Early stopping params
 
 parser.add_argument('--es_patience', type=int, default=20,
@@ -210,6 +238,16 @@ parser.add_argument('--es_stop_epoch', type=int, default=50,
                     help='earliest epoch possible for stopping')
 parser.add_argument('--batch_size', type=int, default=1,
                     help='batch size (only batch_size=1 supported)')
+
+## Eval artifact params
+parser.add_argument('--save_eval_artifacts', action='store_true', default=False,
+                    help='save per-fold eval artifacts (predictions CSV, ROC, confusion matrix, metrics JSON)')
+parser.add_argument('--eval_artifact_dir', type=str, default=None,
+                    help='directory for eval artifacts (default: results_dir/eval_artifacts)')
+parser.add_argument('--plot_roc', action='store_true', default=False,
+                    help='generate ROC curve plots')
+parser.add_argument('--plot_confusion', action='store_true', default=False,
+                    help='generate confusion matrix plots')
 
 
 args = parser.parse_args()
@@ -292,6 +330,8 @@ settings.update({
     'local_segment_mode': args.local_segment_mode,
     'local_segment_size': args.local_segment_size,
     'batch_size': args.batch_size,
+    'attn_type': args.attn_type,
+    'attn_dim': args.attn_dim,
 })
 
 

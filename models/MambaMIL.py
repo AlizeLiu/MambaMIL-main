@@ -21,6 +21,41 @@ def initialize_weights(module):
             nn.init.constant_(m.weight, 1.0)
 
 
+# ---------------------------------------------------------------------------
+# Attention modules for MIL readout
+# ---------------------------------------------------------------------------
+class SimpleAttention(nn.Module):
+    """Standard attention: Linear -> Tanh -> Linear.
+    Output shape: [B, M, 1]
+    """
+    def __init__(self, in_dim, attn_dim=128):
+        super(SimpleAttention, self).__init__()
+        self.attn = nn.Sequential(
+            nn.Linear(in_dim, attn_dim),
+            nn.Tanh(),
+            nn.Linear(attn_dim, 1),
+        )
+
+    def forward(self, h):
+        """h: [B, M, in_dim] -> A: [B, M, 1]"""
+        return self.attn(h)
+
+
+class GatedAttention(nn.Module):
+    """Gated attention: V=Linear->Tanh, U=Linear->Sigmoid, w=Linear.
+    Output: w(V(h) * U(h))  shape [B, M, 1]
+    """
+    def __init__(self, in_dim, attn_dim=128):
+        super(GatedAttention, self).__init__()
+        self.V = nn.Sequential(nn.Linear(in_dim, attn_dim), nn.Tanh())
+        self.U = nn.Sequential(nn.Linear(in_dim, attn_dim), nn.Sigmoid())
+        self.w = nn.Linear(attn_dim, 1)
+
+    def forward(self, h):
+        """h: [B, M, in_dim] -> A: [B, M, 1]"""
+        return self.w(self.V(h) * self.U(h))
+
+
 class MambaMIL(nn.Module):
     def __init__(
         self,
@@ -46,6 +81,8 @@ class MambaMIL(nn.Module):
         gamma_init=0.0,
         local_segment_mode='none',
         local_segment_size=50,
+        attn_type='simple',
+        attn_dim=128,
     ):
         super(MambaMIL, self).__init__()
 
@@ -103,12 +140,13 @@ class MambaMIL(nn.Module):
 
         self.norm = nn.LayerNorm(hidden_dim)
 
-        # 注意：这是标准 attention (Linear->Tanh->Linear)，不是 Gated Attention (Linear->sigmoid + Linear->softmax)
-        self.attention = nn.Sequential(
-            nn.Linear(hidden_dim, 128),
-            nn.Tanh(),
-            nn.Linear(128, 1)
-        )
+        # Attention readout: parameterized by attn_type (simple or gated)
+        if attn_type == 'gated':
+            self.attention = GatedAttention(hidden_dim, attn_dim=attn_dim)
+        elif attn_type == 'simple':
+            self.attention = SimpleAttention(hidden_dim, attn_dim=attn_dim)
+        else:
+            raise ValueError(f"Unknown attn_type: {attn_type}. Must be 'simple' or 'gated'.")
 
         self.classifier = nn.Linear(hidden_dim, self.n_classes)
 
