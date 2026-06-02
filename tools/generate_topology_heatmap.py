@@ -3,13 +3,13 @@
 Generate topology-aware attention heatmap for a slide.
 
 Usage:
-    python tools/generate_topology_heatmap.py \
-        --slide_id TCGA-XX-XXXX-01Z-00-DX1 \
-        --coords_h5 /path/to/patches/slide.h5 \
-        --hilbert_pt /path/to/hilbert/slide_hilbert.pt \
-        --feature_pt /path/to/pt_files/slide.pt \
-        --checkpoint /path/to/s_checkpoint.pt \
-        --pool_size 50 \
+    python tools/generate_topology_heatmap.py \\
+        --slide_id TCGA-XX-XXXX-01Z-00-DX1 \\
+        --coords_h5 /path/to/patches/slide.h5 \\
+        --hilbert_pt /path/to/hilbert/slide_hilbert.pt \\
+        --feature_pt /path/to/pt_files/slide.pt \\
+        --checkpoint /path/to/s_checkpoint.pt \\
+        --pool_size 50 \\
         --output_dir ./heatmap_output
 
 This script:
@@ -34,7 +34,7 @@ def main(args):
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
     print(f"Using device: {device}")
     
-    # Build model
+    # Build model with ALL training parameters
     from models.MambaMIL import MambaMIL
     model = MambaMIL(
         in_dim=args.in_dim,
@@ -42,23 +42,37 @@ def main(args):
         dropout=0.0,
         act='gelu',
         survival=args.survival,
+        layer=1,  # fallback, overridden by local/global_layers
+        rate=args.mambamil_rate,
+        type=args.mambamil_type,
         hidden_dim=args.hidden_dim,
         local_layers=args.local_layers,
         global_layers=args.global_layers,
         pool_size=args.pool_size,
         use_atp_pool=not args.disable_atp_pool,
-        pool_mode=args.pool_mode,
         diffusion_steps=args.diffusion_steps,
         K_init=args.K_init,
+        atp_dt=args.atp_dt,
+        norm_type=args.norm_type,
+        pool_mode=args.pool_mode,
+        tau_init=args.tau_init,
+        gamma_init=args.gamma_init,
+        local_segment_mode=args.local_segment_mode,
+        local_segment_size=args.local_segment_size,
         attn_type=args.attn_type,
         attn_dim=args.attn_dim,
     )
     
-    # Load checkpoint
+    # Load checkpoint with strict=True
     if args.checkpoint:
         print(f"Loading checkpoint: {args.checkpoint}")
         state_dict = torch.load(args.checkpoint, map_location=device)
-        model.load_state_dict(state_dict)
+        missing, unexpected = model.load_state_dict(state_dict, strict=True)
+        if missing:
+            print(f"  WARNING: missing keys: {missing}")
+        if unexpected:
+            print(f"  WARNING: unexpected keys: {unexpected}")
+        print("  Checkpoint loaded successfully (strict=True)")
     
     model = model.to(device)
     model.eval()
@@ -74,6 +88,7 @@ def main(args):
         pool_size=args.pool_size,
         output_dir=args.output_dir,
         device=device,
+        attention_mapping=args.attention_mapping,
     )
     
     print(f"\nResults:")
@@ -95,21 +110,42 @@ if __name__ == '__main__':
     parser.add_argument('--hilbert_pt', type=str, required=True, help='Path to Hilbert index .pt file')
     parser.add_argument('--feature_pt', type=str, required=True, help='Path to Hilbert-ordered feature .pt file')
     
-    # Model
+    # Model architecture (must match training)
     parser.add_argument('--checkpoint', type=str, default=None, help='Path to model checkpoint')
-    parser.add_argument('--in_dim', type=int, default=1024, help='Feature input dimension')
-    parser.add_argument('--n_classes', type=int, default=2, help='Number of classes')
-    parser.add_argument('--hidden_dim', type=int, default=256, help='Hidden dimension')
-    parser.add_argument('--local_layers', type=int, default=1, help='Number of local Mamba layers')
-    parser.add_argument('--global_layers', type=int, default=1, help='Number of global Mamba layers')
-    parser.add_argument('--pool_size', type=int, default=50, help='ATP-Pool window size')
-    parser.add_argument('--disable_atp_pool', action='store_true', help='Disable ATP-Pool')
+    parser.add_argument('--in_dim', type=int, default=1024)
+    parser.add_argument('--n_classes', type=int, default=2)
+    parser.add_argument('--hidden_dim', type=int, default=256)
+    parser.add_argument('--local_layers', type=int, default=1)
+    parser.add_argument('--global_layers', type=int, default=1)
+    parser.add_argument('--mambamil_type', type=str, default='SRMamba', choices=['Mamba', 'BiMamba', 'SRMamba'])
+    parser.add_argument('--mambamil_rate', type=int, default=5)
+    
+    # Pool config
+    parser.add_argument('--pool_size', type=int, default=50)
+    parser.add_argument('--disable_atp_pool', action='store_true')
     parser.add_argument('--pool_mode', type=str, default='avg', choices=['avg', 'diffusion', 'residual'])
     parser.add_argument('--diffusion_steps', type=int, default=0)
     parser.add_argument('--K_init', type=float, default=2.5)
+    parser.add_argument('--atp_dt', type=float, default=0.1)
+    parser.add_argument('--norm_type', type=str, default='mean', choices=['mean', 'sum'])
+    parser.add_argument('--tau_init', type=float, default=2.0)
+    parser.add_argument('--gamma_init', type=float, default=0.0)
+    
+    # Segment config
+    parser.add_argument('--local_segment_mode', type=str, default='none', choices=['none', 'chunk'])
+    parser.add_argument('--local_segment_size', type=int, default=50)
+    
+    # Attention readout
     parser.add_argument('--attn_type', type=str, default='simple', choices=['simple', 'gated'])
     parser.add_argument('--attn_dim', type=int, default=128)
+    
+    # Attention mapping
+    parser.add_argument('--attention_mapping', type=str, default='assign', choices=['assign', 'distribute'],
+                        help='How to map supernode attention to patches: assign (same value) or distribute (divide)')
+    
+    # Mode
     parser.add_argument('--survival', action='store_true', help='Use survival mode')
+    parser.add_argument('--allow_partial_load', action='store_true', help='Allow partial checkpoint loading (strict=False)')
     
     # Output
     parser.add_argument('--output_dir', type=str, default=None, help='Output directory (default: heatmap_output/<slide_id>)')

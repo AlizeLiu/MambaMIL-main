@@ -214,10 +214,10 @@ def test_save_fold_eval_artifacts():
         assert os.path.exists(pred_csv), f"Missing: {pred_csv}"
         pred_df = pd.read_csv(pred_csv)
         assert len(pred_df) == n, f"Expected {n} rows, got {len(pred_df)}"
-        assert 'y_true' in pred_df.columns
-        assert 'y_pred' in pred_df.columns
-        assert 'prob_class_0' in pred_df.columns
-        assert 'prob_class_1' in pred_df.columns
+        assert 'label' in pred_df.columns
+        assert 'pred' in pred_df.columns
+        assert 'prob_0' in pred_df.columns
+        assert 'prob_1' in pred_df.columns
         
         # Check metrics JSON
         metrics_json = os.path.join(fold_dir, 'test_metrics.json')

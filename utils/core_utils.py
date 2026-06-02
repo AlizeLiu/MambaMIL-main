@@ -1,3 +1,4 @@
+import warnings
 import numpy as np
 import torch
 from utils.utils import *
@@ -6,7 +7,7 @@ from dataset.dataset_generic import save_splits
 from sklearn.preprocessing import label_binarize
 from sklearn.metrics import roc_auc_score, roc_curve
 from sklearn.metrics import auc as calc_auc
-from utils.eval_utils import save_fold_eval_artifacts, compute_binary_roc, plot_mean_roc
+from utils.eval_utils import save_fold_eval_artifacts, save_summary_metrics, compute_binary_roc, plot_mean_roc
 import wandb
 
 def find_func(model_name: str):
@@ -266,17 +267,25 @@ def train(datasets, cur, args):
         val_raw = summary(model, val_loader, args.n_classes, return_raw=True)[4]
         artifact_dir = getattr(args, 'eval_artifact_dir', None) or args.results_dir
         
+        # Get slide_ids and case_ids from dataset
+        test_slide_ids = test_raw.get('slide_ids', None)
+        test_case_ids = test_raw.get('case_ids', None)
+        val_slide_ids = val_raw.get('slide_ids', None)
+        val_case_ids = val_raw.get('case_ids', None)
+        
         test_metrics = save_fold_eval_artifacts(
             artifact_dir, cur, 'test',
             test_raw['y_true'], test_raw['y_pred'], test_raw['y_prob'],
             plot_roc_flag=getattr(args, 'plot_roc', False),
             plot_confusion_flag=getattr(args, 'plot_confusion', False),
+            slide_ids=test_slide_ids, case_ids=test_case_ids, fold_num=cur,
         )
         val_metrics = save_fold_eval_artifacts(
             artifact_dir, cur, 'val',
             val_raw['y_true'], val_raw['y_pred'], val_raw['y_prob'],
             plot_roc_flag=getattr(args, 'plot_roc', False),
             plot_confusion_flag=getattr(args, 'plot_confusion', False),
+            slide_ids=val_slide_ids, case_ids=val_case_ids, fold_num=cur,
         )
         print(f'  Eval artifacts saved to {artifact_dir}/eval_artifacts/fold_{cur}/')
 
@@ -376,12 +385,17 @@ def validate(cur, epoch, model, loader, n_classes, early_stopping = None, writer
     val_loss /= len(loader)
 
     if n_classes == 2:
-        print(f'label: {labels}, prob: {prob[:, 1]}')
-        auc = roc_auc_score(labels, prob[:, 1])
-    
+        try:
+            auc = roc_auc_score(labels, prob[:, 1])
+        except ValueError as e:
+            warnings.warn(f"AUC undefined for fold {cur} val: {e}")
+            auc = float('nan')
     else:
-
-        auc = roc_auc_score(labels, prob, multi_class='ovr')
+        try:
+            auc = roc_auc_score(labels, prob, multi_class='ovr')
+        except ValueError as e:
+            warnings.warn(f"AUC undefined for fold {cur} val: {e}")
+            auc = float('nan')
     
     
     if writer:
@@ -447,25 +461,47 @@ def summary(model, loader, n_classes, return_raw=False):
     all_label = np.concatenate(all_label)
 
     if n_classes == 2:
-        auc = roc_auc_score(all_labels, all_probs[:, 1])
+        try:
+            auc = roc_auc_score(all_labels, all_probs[:, 1])
+        except ValueError as e:
+            warnings.warn(f"AUC undefined in summary: {e}")
+            auc = float('nan')
         aucs = []
     else:
         aucs = []
         binary_labels = label_binarize(all_labels, classes=[i for i in range(n_classes)])
         for class_idx in range(n_classes):
             if class_idx in all_labels:
-                fpr, tpr, _ = roc_curve(binary_labels[:, class_idx], all_probs[:, class_idx])
-                aucs.append(calc_auc(fpr, tpr))
+                try:
+                    fpr, tpr, _ = roc_curve(binary_labels[:, class_idx], all_probs[:, class_idx])
+                    aucs.append(calc_auc(fpr, tpr))
+                except ValueError:
+                    aucs.append(float('nan'))
             else:
                 aucs.append(float('nan'))
 
         auc = np.nanmean(np.array(aucs))
 
     if return_raw:
+        # Collect slide_ids and case_ids for prediction CSV
+        slide_id_list = []
+        case_id_list = []
+        for batch_idx in range(len(loader)):
+            sid = slide_ids.iloc[batch_idx] if slide_ids is not None else f'slide_{batch_idx}'
+            slide_id_list.append(str(sid))
+            # Try to get case_id from slide_data
+            try:
+                cid = loader.dataset.slide_data['case_id'].iloc[batch_idx]
+                case_id_list.append(str(cid))
+            except (KeyError, IndexError):
+                case_id_list.append('')
+        
         raw = {
             'y_true': all_labels,
             'y_pred': all_Y_hat,
             'y_prob': all_probs,
+            'slide_ids': slide_id_list,
+            'case_ids': case_id_list,
         }
         return patient_results, test_error, auc, acc_logger, raw
 

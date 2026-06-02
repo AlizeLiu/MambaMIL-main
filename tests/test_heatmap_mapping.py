@@ -36,23 +36,39 @@ def _make_pt(path, idx):
 # ------------------------------------------------------------------
 def test_full_no_sampling_mapping():
     """N=100, pool_size=10, M=10. Supernode i -> patches [10i, 10i+10).
-    Note: compute_patch_attention distributes attention equally among patches,
-    so patch_attn = supernode_attn / pool_size.
+    With assign mode (default): each patch gets supernode's attention value.
     """
     N, pool_size = 100, 10
     M = N // pool_size
     attn = np.arange(M, dtype=np.float32)  # [0, 1, 2, ..., 9]
 
-    patch_attn = compute_patch_attention(attn, N, pool_size)
+    # assign mode (default)
+    patch_attn = compute_patch_attention(attn, N, pool_size, mapping_mode='assign')
     assert patch_attn.shape == (N,), f"Expected shape ({N},), got {patch_attn.shape}"
 
     for m in range(M):
         start = m * pool_size
         end = start + pool_size
-        expected_val = float(m) / pool_size  # attention is distributed equally
+        expected_val = float(m)  # assign: same value
         assert np.allclose(patch_attn[start:end], expected_val), \
             f"Supernode {m}: expected {expected_val}, got {patch_attn[start:end]}"
-    print("PASS: test_full_no_sampling_mapping")
+    print("PASS: test_full_no_sampling_mapping (assign)")
+
+
+def test_full_no_sampling_mapping_distribute():
+    """Same setup but with distribute mode: patch_attn = supernode_attn / pool_size."""
+    N, pool_size = 100, 10
+    M = N // pool_size
+    attn = np.arange(M, dtype=np.float32)
+
+    patch_attn = compute_patch_attention(attn, N, pool_size, mapping_mode='distribute')
+    for m in range(M):
+        start = m * pool_size
+        end = start + pool_size
+        expected_val = float(m) / pool_size
+        assert np.allclose(patch_attn[start:end], expected_val), \
+            f"Supernode {m}: expected {expected_val}, got {patch_attn[start:end]}"
+    print("PASS: test_full_no_sampling_mapping (distribute)")
 
 
 # ------------------------------------------------------------------
@@ -67,9 +83,8 @@ def test_non_divisible_n():
     patch_attn = compute_patch_attention(attn, N, pool_size)
     assert patch_attn.shape == (N,)
 
-    # Last supernode (idx=10) -> patches 100-104, value=10/5=2.0 (5 patches)
-    expected_last = 10.0 / 5  # supernode_attn=10, 5 patches
-    assert np.allclose(patch_attn[100:105], expected_last), \
+    # Last supernode (idx=10) -> patches 100-104, value=10 (assign mode)
+    assert np.allclose(patch_attn[100:105], 10.0), \
         f"Last supernode patches wrong: {patch_attn[100:105]}"
     print("PASS: test_non_divisible_n")
 
@@ -88,8 +103,8 @@ def test_sampled_indices_mapping():
     # compute_patch_attention works on the sampled sequence length
     patch_attn = compute_patch_attention(attn, len(sampled), pool_size)
     assert patch_attn.shape == (100,)
-    # First supernode -> patches 0-9, value=1.0/10=0.1
-    assert np.allclose(patch_attn[:10], 1.0 / pool_size)
+    # First supernode -> patches 0-9, value=1.0 (assign mode)
+    assert np.allclose(patch_attn[:10], 1.0)
     print("PASS: test_sampled_indices_mapping")
 
 
@@ -209,6 +224,7 @@ def test_error_on_missing_coords_key():
 # ------------------------------------------------------------------
 if __name__ == '__main__':
     test_full_no_sampling_mapping()
+    test_full_no_sampling_mapping_distribute()
     test_non_divisible_n()
     test_sampled_indices_mapping()
     test_hilbert_index_reorder()
