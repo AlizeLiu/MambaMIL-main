@@ -63,16 +63,42 @@ def main(args):
         attn_dim=args.attn_dim,
     )
     
-    # Load checkpoint with strict=True
+    # Load checkpoint
     if args.checkpoint:
         print(f"Loading checkpoint: {args.checkpoint}")
+        strict = not args.allow_partial_load
         state_dict = torch.load(args.checkpoint, map_location=device)
-        missing, unexpected = model.load_state_dict(state_dict, strict=True)
+        
+        # Handle backward compatibility: old checkpoints used nn.Sequential directly
+        # as self.attention, new code uses SimpleAttention/GatedAttention with self.attn
+        remapped = {}
+        needs_remap = False
+        for k, v in state_dict.items():
+            if k.startswith('attention.0.') or k.startswith('attention.2.'):
+                # Old format: attention.{layer_idx}.{param}
+                new_key = k.replace('attention.', 'attention.attn.', 1)
+                remapped[new_key] = v
+                needs_remap = True
+            else:
+                remapped[k] = v
+        if needs_remap:
+            print("  [INFO] Remapped old attention keys to SimpleAttention format")
+            state_dict = remapped
+        
+        try:
+            missing, unexpected = model.load_state_dict(state_dict, strict=strict)
+        except RuntimeError as e:
+            print(f"\n[FATAL] Checkpoint loading failed (strict={strict}): {e}")
+            if not args.allow_partial_load:
+                print("Hint: use --allow_partial_load to force loading with missing/unexpected keys (debug only)")
+            sys.exit(1)
+        if args.allow_partial_load:
+            print("  [WARNING] Partial checkpoint loading enabled (debug only, not for paper)")
         if missing:
-            print(f"  WARNING: missing keys: {missing}")
+            print(f"  Missing keys: {missing}")
         if unexpected:
-            print(f"  WARNING: unexpected keys: {unexpected}")
-        print("  Checkpoint loaded successfully (strict=True)")
+            print(f"  Unexpected keys: {unexpected}")
+        print(f"  Checkpoint loaded (strict={strict})")
     
     model = model.to(device)
     model.eval()

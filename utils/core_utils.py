@@ -457,7 +457,7 @@ def summary(model, loader, n_classes, return_raw=False):
         all_label.append(label.cpu().numpy())
 
     test_error /= len(loader)
-    all_Y_hat = np.concatenate(all_Y_hat)
+    all_Y_hat = np.concatenate(all_Y_hat).flatten()
     all_label = np.concatenate(all_label)
 
     if n_classes == 2:

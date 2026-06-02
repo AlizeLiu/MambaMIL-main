@@ -96,25 +96,34 @@ def main(args):
 
     # Save mean ROC across folds if eval artifacts enabled
     if getattr(args, 'save_eval_artifacts', False) and getattr(args, 'plot_roc', False):
-        from utils.eval_utils import compute_binary_roc, plot_mean_roc
+        from utils.eval_utils import compute_binary_roc, plot_mean_roc, save_summary_metrics
         artifact_dir = getattr(args, 'eval_artifact_dir', None) or args.results_dir
         fold_fprs = []
         fold_tprs = []
         fold_aucs = []
+        all_fold_metrics = []
         for fold_idx in folds:
             pred_csv = os.path.join(artifact_dir, 'eval_artifacts', f'fold_{fold_idx}', 'test_predictions.csv')
+            metrics_json = os.path.join(artifact_dir, 'eval_artifacts', f'fold_{fold_idx}', 'test_metrics.json')
             if os.path.exists(pred_csv):
                 pred_df = pd.read_csv(pred_csv)
-                y_true = pred_df['y_true'].values
-                y_prob = pred_df['prob_class_1'].values
+                y_true = pred_df['label'].values
+                y_prob = pred_df['prob_1'].values
                 fpr, tpr, _, auc = compute_binary_roc(y_true, y_prob)
                 fold_fprs.append(fpr)
                 fold_tprs.append(tpr)
                 fold_aucs.append(auc)
+            if os.path.exists(metrics_json):
+                import json
+                with open(metrics_json) as f:
+                    all_fold_metrics.append(json.load(f))
         if fold_fprs:
             mean_roc_path = os.path.join(artifact_dir, 'eval_artifacts', 'mean_roc.png')
             plot_mean_roc(fold_fprs, fold_tprs, fold_aucs, mean_roc_path)
             print(f'Mean ROC saved to {mean_roc_path}')
+        if all_fold_metrics:
+            summary_csv = save_summary_metrics(all_fold_metrics, artifact_dir, split_name='test')
+            print(f'Summary metrics saved to {summary_csv}')
 
 
 # Generic training settings
