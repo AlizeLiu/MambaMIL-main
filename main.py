@@ -205,8 +205,8 @@ parser.add_argument('--order_seed', type=int, default=1,
 parser.add_argument('--pool_size', type=int, default=50,
                     help='pooling window size for ATP-Pool')
 parser.add_argument('--pool_mode', type=str, default='avg',
-                    choices=['avg', 'diffusion', 'residual'],
-                    help='ATPPool mode: avg (plain), diffusion (PM diffusion), residual (boundary residual)')
+                    choices=['avg', 'diffusion', 'residual', 'bp'],
+                    help='ATPPool mode: avg (plain), diffusion (PM diffusion), residual (boundary residual), bp (boundary-aware pooling)')
 parser.add_argument('--diffusion_steps', type=int, default=0,
                     help='anisotropic diffusion steps in ATP-Pool (0=disable diffusion but keep avg_pool)')
 parser.add_argument('--K_init', type=float, default=2.5,
@@ -219,6 +219,12 @@ parser.add_argument('--tau_init', type=float, default=2.0,
                     help='initial temperature for boundary residual pooling')
 parser.add_argument('--gamma_init', type=float, default=0.0,
                     help='initial raw gamma for boundary residual pooling; 0 means avg pooling at init')
+parser.add_argument('--bp_alpha_init', type=float, default=1.0,
+                    help='initial alpha for BP-Pool (cosine similarity weight)')
+parser.add_argument('--bp_beta_init', type=float, default=1.0,
+                    help='initial beta for BP-Pool (gradient penalty weight)')
+parser.add_argument('--bp_lambda_init', type=float, default=1.0,
+                    help='initial lambda for BP-Pool (softmax temperature)')
 parser.add_argument('--local_layers', type=int, default=1,
                     help='number of local Mamba layers')
 parser.add_argument('--global_layers', type=int, default=1,
@@ -316,6 +322,9 @@ settings.update({
     'pool_mode': args.pool_mode,
     'tau_init': args.tau_init,
     'gamma_init': args.gamma_init,
+    'bp_alpha_init': args.bp_alpha_init,
+    'bp_beta_init': args.bp_beta_init,
+    'bp_lambda_init': args.bp_lambda_init,
     'use_atp_pool': args.use_atp_pool,
     'features_already_hilbert': args.features_already_hilbert,
     'use_hilbert_index': args.use_hilbert_index,

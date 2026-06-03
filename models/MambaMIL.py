@@ -79,6 +79,9 @@ class MambaMIL(nn.Module):
         pool_mode='diffusion',
         tau_init=2.0,
         gamma_init=0.0,
+        bp_alpha_init=1.0,
+        bp_beta_init=1.0,
+        bp_lambda_init=1.0,
         local_segment_mode='none',
         local_segment_size=50,
         attn_type='simple',
@@ -134,6 +137,9 @@ class MambaMIL(nn.Module):
                 pool_mode=pool_mode,
                 tau_init=tau_init,
                 gamma_init=gamma_init,
+                bp_alpha_init=bp_alpha_init,
+                bp_beta_init=bp_beta_init,
+                bp_lambda_init=bp_lambda_init,
             )
         else:
             self.atp_pool = nn.Identity()

@@ -12,6 +12,7 @@ class ATPPool(nn.Module):
         "avg"        - 普通 padding + avg_pool1d (无扩散, 无边界残差)
         "diffusion"  - Perona-Malik 扩散 + avg_pool1d (原始模式)
         "residual"   - Boundary Residual Pooling (avg + 边界残差)
+        "bp"         - Boundary-aware Pooling (可微边界感知池化)
     """
 
     def __init__(
@@ -25,6 +26,9 @@ class ATPPool(nn.Module):
         pool_mode='diffusion',
         tau_init=2.0,
         gamma_init=0.0,
+        bp_alpha_init=1.0,
+        bp_beta_init=1.0,
+        bp_lambda_init=1.0,
     ):
         super(ATPPool, self).__init__()
         self.dim = dim
@@ -34,10 +38,15 @@ class ATPPool(nn.Module):
         self.norm_type = norm_type
         self.pool_mode = pool_mode
 
-        # Learnable parameters
+        # Learnable parameters for diffusion/residual modes
         self.K = nn.Parameter(torch.tensor(float(K_init)))
         self.tau_raw = nn.Parameter(torch.tensor(float(tau_init)))
         self.gamma_raw = nn.Parameter(torch.tensor(float(gamma_init)))
+        
+        # Learnable parameters for BP mode
+        self.bp_alpha_raw = nn.Parameter(torch.tensor(float(bp_alpha_init)))
+        self.bp_beta_raw = nn.Parameter(torch.tensor(float(bp_beta_init)))
+        self.bp_lambda_raw = nn.Parameter(torch.tensor(float(bp_lambda_init)))
 
         # Diagnosis
         self._diag_enabled = False
@@ -232,6 +241,87 @@ class ATPPool(nn.Module):
         return x
 
     # ------------------------------------------------------------------
+    # BP-Pool mode
+    # ------------------------------------------------------------------
+    def _bp_pool(self, x):
+        """Boundary-aware Pooling (BP-Pool): differentiable boundary-aware pooling.
+        
+        Math:
+            sim_i = cosine(x_i, x_{i+1})
+            grad_i = mean((x_i - x_{i+1})^2)
+            q_i = alpha * sim_i - beta * grad_i
+            p_i = sigmoid(q_i)  # edge merge probability
+            h_i = 0.5*(p_{i-1}+p_i)  # edge -> token homogeneity
+            w_i = softmax(lambda * h_i)  # pooling weights
+            z_m = sum_i w_i * x_i
+        """
+        B, L, D = x.shape
+        
+        # Learnable parameters (softplus for non-negative)
+        alpha = F.softplus(self.bp_alpha_raw) + 1e-6
+        beta = F.softplus(self.bp_beta_raw) + 1e-6
+        lam = F.softplus(self.bp_lambda_raw) + 1e-6
+        
+        # Pad to pool_size
+        x_pad, pad_len = self._pad_to_pool_size(x, mode='replicate')
+        B, Lp, D = x_pad.shape
+        M = Lp // self.pool_size
+        
+        # Reshape into windows: [B, M, pool_size, D]
+        x_seg = x_pad.reshape(B, M, self.pool_size, D)
+        
+        # Compute edge features within each window
+        # x_i and x_{i+1}
+        x_left = x_seg[:, :, :-1, :]   # [B, M, pool_size-1, D]
+        x_right = x_seg[:, :, 1:, :]   # [B, M, pool_size-1, D]
+        
+        # Cosine similarity: sim_i
+        x_left_norm = F.normalize(x_left, dim=-1)
+        x_right_norm = F.normalize(x_right, dim=-1)
+        sim = (x_left_norm * x_right_norm).sum(dim=-1)  # [B, M, pool_size-1]
+        
+        # Gradient magnitude: grad_i = mean((x_i - x_{i+1})^2)
+        grad = ((x_left - x_right) ** 2).mean(dim=-1)  # [B, M, pool_size-1]
+        
+        # Edge merge probability: p_i = sigmoid(alpha*sim - beta*grad)
+        q = alpha * sim - beta * grad  # [B, M, pool_size-1]
+        p = torch.sigmoid(q)  # [B, M, pool_size-1]
+        
+        # Edge -> token homogeneity: h_i = 0.5*(p_{i-1}+p_i)
+        # For tokens at boundaries, use available edges
+        # h[0] = p[0], h[-1] = p[-1], h[i] = 0.5*(p[i-1]+p[i])
+        h = torch.zeros(B, M, self.pool_size, device=x.device, dtype=x.dtype)
+        h[:, :, 0] = p[:, :, 0]
+        h[:, :, -1] = p[:, :, -1]
+        h[:, :, 1:-1] = 0.5 * (p[:, :, :-1] + p[:, :, 1:])
+        
+        # Pooling weights: w_i = softmax(lambda * h_i)
+        w = torch.softmax(lam * h, dim=-1)  # [B, M, pool_size]
+        w = w.unsqueeze(-1)  # [B, M, pool_size, 1]
+        
+        # Weighted sum: z_m = sum_i w_i * x_i
+        z = (w * x_seg).sum(dim=2)  # [B, M, D]
+        
+        # Diagnosis
+        diag_this = self._diag_enabled and self._diag_step < self._diag_max_steps
+        if diag_this:
+            with torch.no_grad():
+                self._diag_records.append({
+                    'alpha': alpha.item(),
+                    'beta': beta.item(),
+                    'lambda': lam.item(),
+                    'p_mean': p.mean().item(),
+                    'p_std': p.std().item(),
+                    'h_mean': h.mean().item(),
+                    'sim_mean': sim.mean().item(),
+                    'grad_mean': grad.mean().item(),
+                    'weight_entropy': -(w * (w + 1e-8).log()).sum(dim=2).mean().item(),
+                })
+            self._diag_step += 1
+        
+        return z
+
+    # ------------------------------------------------------------------
     # Forward
     # ------------------------------------------------------------------
     def forward(self, x):
@@ -247,6 +337,9 @@ class ATPPool(nn.Module):
 
         elif self.pool_mode == "residual":
             return self._boundary_residual_pool(x)
+
+        elif self.pool_mode == "bp":
+            return self._bp_pool(x)
 
         else:
             raise ValueError(f"Unknown pool_mode: {self.pool_mode}")
