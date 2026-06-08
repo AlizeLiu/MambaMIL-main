@@ -368,6 +368,18 @@ if args.task == 'LUAD_LUSC':
                             patient_strat=False,
                             ignore=[])
 
+elif args.task == 'OV_tumor_normal':
+    args.n_classes=2
+    csv_to_load = args.csv_path if args.csv_path else 'dataset_csv/OV_tumor_normal.csv'
+    dataset = Generic_MIL_Dataset(csv_path = csv_to_load,
+                            data_dir= args.data_root_dir,
+                            shuffle = False,
+                            seed = args.seed,
+                            print_info = True,
+                            label_dict = {0:0, 1:1},  # 已经是数字标签
+                            patient_strat=False,
+                            ignore=[])
+
 elif args.task == 'BRACS':
     args.n_classes=7
     csv_to_load = args.csv_path if args.csv_path else 'dataset_csv/BRACS.csv'

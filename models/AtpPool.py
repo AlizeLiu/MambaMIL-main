@@ -240,87 +240,71 @@ class ATPPool(nn.Module):
 
         return x
 
-    # ------------------------------------------------------------------
-    # BP-Pool mode
-    # ------------------------------------------------------------------
     def _bp_pool(self, x):
-        """Boundary-aware Pooling (BP-Pool): differentiable boundary-aware pooling.
-        
-        Math:
-            sim_i = cosine(x_i, x_{i+1})
-            grad_i = mean((x_i - x_{i+1})^2)
-            q_i = alpha * sim_i - beta * grad_i
-            p_i = sigmoid(q_i)  # edge merge probability
-            h_i = 0.5*(p_{i-1}+p_i)  # edge -> token homogeneity
-            w_i = softmax(lambda * h_i)  # pooling weights
-            z_m = sum_i w_i * x_i
+        """
+        Context-Relative Salience Pooling
         """
         B, L, D = x.shape
         
-        # Learnable parameters (softplus for non-negative)
-        alpha = F.softplus(self.bp_alpha_raw) + 1e-6
-        beta = F.softplus(self.bp_beta_raw) + 1e-6
-        lam = F.softplus(self.bp_lambda_raw) + 1e-6
+        # 1. 确保可学习参数非负，并设定合理的初始缩放
+        alpha = F.softplus(self.bp_alpha_raw) + 1e-5
+        beta = F.softplus(self.bp_beta_raw) + 1e-5
+        lam = F.softplus(self.bp_lambda_raw) + 1e-5
         
-        # Pad to pool_size
+        # 2. 规整长度并划分为局部池化窗口
         x_pad, pad_len = self._pad_to_pool_size(x, mode='replicate')
         B, Lp, D = x_pad.shape
         M = Lp // self.pool_size
         
-        # Reshape into windows: [B, M, pool_size, D]
+        # x_seg 形状: [B, M, pool_size, D]
         x_seg = x_pad.reshape(B, M, self.pool_size, D)
         
-        # Compute edge features within each window
-        # x_i and x_{i+1}
-        x_left = x_seg[:, :, :-1, :]   # [B, M, pool_size-1, D]
-        x_right = x_seg[:, :, 1:, :]   # [B, M, pool_size-1, D]
+        # 3. 【核心修正】计算窗口级上下文均值（替代脆弱的相邻差分）
+        # x_mean 形状: [B, M, 1, D]
+        x_mean = x_seg.mean(dim=2, keepdim=True)
         
-        # Cosine similarity: sim_i
-        x_left_norm = F.normalize(x_left, dim=-1)
-        x_right_norm = F.normalize(x_right, dim=-1)
-        sim = (x_left_norm * x_right_norm).sum(dim=-1)  # [B, M, pool_size-1]
+        # 4. 计算 Token 与当前上下文环境的相对相似度
+        x_seg_norm = F.normalize(x_seg, dim=-1)
+        x_mean_norm = F.normalize(x_mean, dim=-1)
+        # sim 形状: [B, M, pool_size]
+        sim = (x_seg_norm * x_mean_norm).sum(dim=-1) 
         
-        # Gradient magnitude: grad_i = mean((x_i - x_{i+1})^2)
-        grad = ((x_left - x_right) ** 2).mean(dim=-1)  # [B, M, pool_size-1]
+        # 5. 计算 Token 与当前上下文环境的相对距离（特征空间方差根值）
+        # dist 形状: [B, M, pool_size]
+        dist = torch.norm(x_seg - x_mean, dim=-1) / (D ** 0.5)
         
-        # Edge merge probability: p_i = sigmoid(alpha*sim - beta*grad)
-        q = alpha * sim - beta * grad  # [B, M, pool_size-1]
-        p = torch.sigmoid(q)  # [B, M, pool_size-1]
+        # 6. 构建具备高信噪比的病理显著性度量逻辑得分 q
+        # 远离局部均值（高 dist）且与 stroma 背景基质低相似（低 sim）的 Token 将获得高分
+        q = beta * dist - alpha * sim  # [B, M, pool_size]
         
-        # Edge -> token homogeneity: h_i = 0.5*(p_{i-1}+p_i)
-        # For tokens at boundaries, use available edges
-        # h[0] = p[0], h[-1] = p[-1], h[i] = 0.5*(p[i-1]+p[i])
-        h = torch.zeros(B, M, self.pool_size, device=x.device, dtype=x.dtype)
-        h[:, :, 0] = p[:, :, 0]
-        h[:, :, -1] = p[:, :, -1]
-        h[:, :, 1:-1] = 0.5 * (p[:, :, :-1] + p[:, :, 1:])
+        # 7. 【核心修正】窗口内部 Z-Score 标准化，强行破解 Mamba 特征平滑引发的 Softmax 均质化退化
+        q_mean = q.mean(dim=-1, keepdim=True)
+        q_std = q.std(dim=-1, keepdim=True) + 1e-6
+        q_hat = (q - q_mean) / q_std  # [B, M, pool_size]
         
-        # Pooling weights: w_i = softmax(lambda * h_i)
-        w = torch.softmax(lam * h, dim=-1)  # [B, M, pool_size]
+        # 8. 结合可学习尖锐度参数 lam 计算池化权重
+        w = torch.softmax(lam * q_hat, dim=-1)  # [B, M, pool_size]
         w = w.unsqueeze(-1)  # [B, M, pool_size, 1]
         
-        # Weighted sum: z_m = sum_i w_i * x_i
+        # 9. 加权聚合
         z = (w * x_seg).sum(dim=2)  # [B, M, D]
         
-        # Diagnosis
-        diag_this = self._diag_enabled and self._diag_step < self._diag_max_steps
-        if diag_this:
+        # 10. 诊断信息监控记录
+        if self._diag_enabled and self._diag_step < self._diag_max_steps:
             with torch.no_grad():
                 self._diag_records.append({
                     'alpha': alpha.item(),
                     'beta': beta.item(),
                     'lambda': lam.item(),
-                    'p_mean': p.mean().item(),
-                    'p_std': p.std().item(),
-                    'h_mean': h.mean().item(),
-                    'sim_mean': sim.mean().item(),
-                    'grad_mean': grad.mean().item(),
+                    'window_dist_max': dist.max().item(),
+                    'window_sim_mean': sim.mean().item(),
                     'weight_entropy': -(w * (w + 1e-8).log()).sum(dim=2).mean().item(),
+                    'weight_max_prob': w.max().item()
                 })
             self._diag_step += 1
-        
+            
         return z
-
+    
     # ------------------------------------------------------------------
     # Forward
     # ------------------------------------------------------------------

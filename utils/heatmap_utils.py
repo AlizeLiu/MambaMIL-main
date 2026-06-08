@@ -2,13 +2,17 @@
 Heatmap utilities for topology-aware attention visualization.
 Maps super-node attention weights to patch-level coordinates using Hilbert curve ordering.
 
-Quality Control:
-- Alignment verification: checks raw_feature[hilbert_idx] vs hilbert_feature
-- Tissue/background filtering (when mask available)
-- Paper-ready colormap styles
+Publication-quality visualization:
+- Panel figure (tissue map / outline / attention heatmap)
+- Raster canvas rendering
+- Soft pathology colormap
+- Gamma-corrected attention normalization
+- Alignment verification
+- Tissue/background quality control
 """
 import os
 import json
+import warnings
 import numpy as np
 import pandas as pd
 import h5py
@@ -17,47 +21,433 @@ import matplotlib
 matplotlib.use('Agg')
 import matplotlib.pyplot as plt
 from matplotlib.colors import LinearSegmentedColormap
+from matplotlib.patches import Rectangle
 
 
 # ============================================================
-# Custom colormaps
+# Colormaps
 # ============================================================
 
-def get_pathology_colormap():
-    """Pathology-style colormap: deep blue -> cyan -> green -> yellow -> red.
-    High contrast, standard heatmap style used in attention visualization."""
+def get_soft_pathology_colormap():
+    """Soft pathology colormap: near-white -> pale yellow -> muted orange -> deep red.
+    Designed for publication heatmaps with white background."""
     colors = [
-        (0.05, 0.05, 0.30),   # deep navy (lowest attention)
-        (0.10, 0.20, 0.60),   # blue
-        (0.10, 0.50, 0.80),   # cyan-blue
-        (0.20, 0.70, 0.60),   # teal
-        (0.40, 0.80, 0.30),   # green
-        (0.70, 0.90, 0.10),   # yellow-green
-        (0.95, 0.85, 0.10),   # yellow
-        (0.95, 0.60, 0.10),   # orange
-        (0.90, 0.30, 0.10),   # red-orange
-        (0.70, 0.10, 0.10),   # dark red (highest attention)
+        "#f7f7f7",  # very low, near white
+        "#fff7bc",  # pale yellow
+        "#fee391",  # light yellow-orange
+        "#fdae61",  # muted orange
+        "#e6550d",  # muted red-orange
+        "#a63603",  # deep muted red
     ]
-    return LinearSegmentedColormap.from_list('pathology', colors, N=256)
+    rgb_colors = []
+    for hex_color in colors:
+        h = hex_color.lstrip('#')
+        rgb_colors.append(tuple(int(h[i:i+2], 16)/255.0 for i in (0, 2, 4)))
+    return LinearSegmentedColormap.from_list('soft_pathology', rgb_colors, N=256)
 
 
-def get_colormap(style='pathology'):
+def get_colormap(style='soft_pathology'):
     """Get colormap by style name.
     
     Args:
-        style: 'pathology', 'magma', 'YlOrRd', or any matplotlib cmap name
+        style: 'soft_pathology', 'magma', 'YlOrRd', 'viridis', 'jet_debug'
     
     Returns:
         matplotlib colormap
     """
-    if style == 'pathology':
-        return get_pathology_colormap()
+    if style == 'soft_pathology':
+        return get_soft_pathology_colormap()
     elif style == 'magma':
         return plt.cm.magma
     elif style in ('YlOrRd', 'yl_or_rd'):
         return plt.cm.YlOrRd
+    elif style == 'viridis':
+        return plt.cm.viridis
+    elif style == 'jet_debug':
+        return plt.cm.jet
+    elif style == 'jet':
+        warnings.warn("[WARNING] jet is not recommended for publication heatmaps. Use 'soft_pathology' instead.")
+        return plt.cm.jet
     else:
-        return plt.get_cmap(style)
+        try:
+            return plt.get_cmap(style)
+        except ValueError:
+            warnings.warn(f"[WARNING] Unknown cmap '{style}', falling back to soft_pathology")
+            return get_soft_pathology_colormap()
+
+
+# ============================================================
+# Attention normalization (with clipping + gamma)
+# ============================================================
+
+def normalize_attention(patch_attention, low_clip=1, high_clip=99, gamma=0.7):
+    """Normalize attention with percentile clipping and gamma correction.
+    
+    Args:
+        patch_attention: np.ndarray [N], raw attention values
+        low_clip: lower percentile for clipping (0-100)
+        high_clip: upper percentile for clipping (0-100)
+        gamma: gamma correction exponent (0-1, lower = more contrast)
+    
+    Returns:
+        attn_norm: np.ndarray [N], normalized to [0, 1], gamma-corrected
+    """
+    vmin = np.percentile(patch_attention, low_clip)
+    vmax = np.percentile(patch_attention, high_clip)
+    
+    attn_clip = np.clip(patch_attention, vmin, vmax)
+    
+    if vmax > vmin:
+        attn_norm = (attn_clip - vmin) / (vmax - vmin + 1e-8)
+    else:
+        attn_norm = np.zeros_like(patch_attention)
+    
+    # Gamma correction for better contrast
+    attn_norm = np.power(attn_norm, gamma)
+    
+    # Ensure no NaN
+    attn_norm = np.nan_to_num(attn_norm, nan=0.0, posinf=1.0, neginf=0.0)
+    
+    return attn_norm
+
+
+# ============================================================
+# Raster canvas rendering
+# ============================================================
+
+def rasterize_attention(coords, attention, patch_size=512, canvas_scale=32, agg='max'):
+    """Rasterize coords and attention into a 2D canvas for heatmap display.
+    
+    Args:
+        coords: np.ndarray [N, 2], patch coordinates
+        attention: np.ndarray [N], attention values (normalized 0-1)
+        patch_size: original patch size (for cell size calculation)
+        canvas_scale: downscale factor (e.g. 32 means each cell = 32x32 pixels)
+        agg: aggregation mode 'max' or 'mean'
+    
+    Returns:
+        canvas: np.ndarray [H, W], attention heatmap (NaN for empty cells)
+        extent: [x_min, x_max, y_min, y_max] for imshow
+    """
+    # Compute canvas dimensions
+    x_min, x_max = coords[:, 0].min(), coords[:, 0].max()
+    y_min, y_max = coords[:, 1].min(), coords[:, 1].max()
+    
+    cell_size = canvas_scale
+    width = int((x_max - x_min) / cell_size) + 2
+    height = int((y_max - y_min) / cell_size) + 2
+    
+    # Initialize canvas
+    if agg == 'max':
+        canvas = np.full((height, width), np.nan, dtype=np.float32)
+        count = np.zeros((height, width), dtype=np.int32)
+    else:
+        canvas = np.zeros((height, width), dtype=np.float32)
+        count = np.zeros((height, width), dtype=np.int32)
+    
+    # Fill canvas
+    for i in range(len(coords)):
+        cx = int((coords[i, 0] - x_min) / cell_size)
+        cy = int((coords[i, 1] - y_min) / cell_size)
+        cx = min(cx, width - 1)
+        cy = min(cy, height - 1)
+        
+        if agg == 'max':
+            if np.isnan(canvas[cy, cx]) or attention[i] > canvas[cy, cx]:
+                canvas[cy, cx] = attention[i]
+        else:
+            canvas[cy, cx] += attention[i]
+        count[cy, cx] += 1
+    
+    # Average for mean aggregation
+    if agg == 'mean':
+        mask = count > 0
+        canvas[mask] = canvas[mask] / count[mask]
+        canvas[~mask] = np.nan
+    
+    extent = [x_min, x_max, y_max, y_min]  # Note: y inverted for image convention
+    
+    return canvas, extent
+
+
+def smooth_canvas(canvas, sigma=1.0):
+    """Apply Gaussian smoothing to canvas."""
+    try:
+        from scipy.ndimage import gaussian_filter
+        # Replace NaN with 0 for smoothing, then restore
+        nan_mask = np.isnan(canvas)
+        canvas_filled = np.where(nan_mask, 0, canvas)
+        smoothed = gaussian_filter(canvas_filled, sigma=sigma)
+        smoothed[nan_mask] = np.nan
+        return smoothed
+    except ImportError:
+        warnings.warn("[WARNING] scipy not available, skipping smoothing")
+        return canvas
+
+
+# ============================================================
+# Tissue outline computation
+# ============================================================
+
+def compute_tissue_outline(coords, canvas_scale=32):
+    """Generate tissue occupancy mask from coords and extract contour.
+    
+    Args:
+        coords: np.ndarray [N, 2], patch coordinates
+        canvas_scale: scale factor for canvas
+    
+    Returns:
+        contours: list of contour arrays (each [K, 2] in canvas coords)
+        extent: [x_min, x_max, y_min, y_max]
+        canvas_shape: (H, W)
+    """
+    x_min, x_max = coords[:, 0].min(), coords[:, 0].max()
+    y_min, y_max = coords[:, 1].min(), coords[:, 1].max()
+    
+    cell_size = canvas_scale
+    width = int((x_max - x_min) / cell_size) + 2
+    height = int((y_max - y_min) / cell_size) + 2
+    
+    # Create binary mask
+    mask = np.zeros((height, width), dtype=bool)
+    for i in range(len(coords)):
+        cx = int((coords[i, 0] - x_min) / cell_size)
+        cy = int((coords[i, 1] - y_min) / cell_size)
+        cx = min(cx, width - 1)
+        cy = min(cy, height - 1)
+        mask[cy, cx] = True
+    
+    # Fill holes
+    try:
+        from scipy.ndimage import binary_fill_holes
+        mask = binary_fill_holes(mask)
+    except ImportError:
+        pass
+    
+    # Extract contours
+    contours = []
+    try:
+        from skimage.measure import find_contours
+        raw_contours = find_contours(mask.astype(float), 0.5)
+        for c in raw_contours:
+            # Convert from canvas coords to original coords
+            c_orig = np.zeros_like(c)
+            c_orig[:, 0] = c[:, 1] * cell_size + x_min
+            c_orig[:, 1] = c[:, 0] * cell_size + y_min
+            contours.append(c_orig)
+    except ImportError:
+        # Fallback: use boundary pixels
+        try:
+            from scipy.ndimage import binary_dilation
+            boundary = mask & ~binary_dilation(mask, iterations=1)
+            ys, xs = np.where(boundary)
+            if len(xs) > 0:
+                contour = np.column_stack([xs * cell_size + x_min, ys * cell_size + y_min])
+                contours.append(contour)
+        except ImportError:
+            pass
+    
+    extent = [x_min, x_max, y_max, y_min]
+    return contours, extent, (height, width)
+
+
+def get_topk_supernodes(supernode_df, top_k=10):
+    """Get top-k supernodes by attention.
+    
+    Args:
+        supernode_df: DataFrame with columns ['attention', 'x_min', 'x_max', 'y_min', 'y_max']
+        top_k: number of top supernodes to return
+    
+    Returns:
+        list of dicts with supernode info
+    """
+    df = supernode_df.nlargest(top_k, 'attention')
+    results = []
+    for _, row in df.iterrows():
+        results.append({
+            'supernode_id': int(row.get('supernode_id', 0)),
+            'attention': float(row['attention']),
+            'x_min': float(row['x_min']),
+            'x_max': float(row['x_max']),
+            'y_min': float(row['y_min']),
+            'y_max': float(row['y_max']),
+        })
+    return results
+
+
+# ============================================================
+# Panel figure generation
+# ============================================================
+
+def generate_attention_panel_figure(
+    coords,
+    patch_attention,
+    supernode_df=None,
+    slide_id='slide',
+    output_path=None,
+    background_image_path=None,
+    label=None,
+    pred=None,
+    prob=None,
+    cmap_style='soft_pathology',
+    clip_percentile=99,
+    low_clip_percentile=1,
+    gamma=0.7,
+    canvas_scale=32,
+    smooth_sigma=1.0,
+    alpha=0.65,
+    dpi=300,
+    show_tissue_outline=True,
+    show_topk_supernodes=True,
+    top_k_supernodes=10,
+    outline_color='#31a354',
+    outline_width=1.0,
+    topk_outline_color='#238b45',
+    attention_title='Projected MIL Super-node Attention',
+    save_pdf=False,
+):
+    """Generate publication-quality three-panel attention figure.
+    
+    Panel A: H&E / tissue background
+    Panel B: Tissue outline + top-k supernode bounding boxes
+    Panel C: Attention heatmap with colorbar
+    
+    Returns:
+        output_path: path to saved PNG
+    """
+    # Normalize attention
+    attn_norm = normalize_attention(patch_attention, low_clip=low_clip_percentile,
+                                     high_clip=clip_percentile, gamma=gamma)
+    
+    # Rasterize for heatmap panel
+    canvas, extent = rasterize_attention(coords, attn_norm, canvas_scale=canvas_scale, agg='max')
+    if smooth_sigma > 0:
+        canvas = smooth_canvas(canvas, sigma=smooth_sigma)
+    
+    # Compute tissue outline
+    contours, _, _ = compute_tissue_outline(coords, canvas_scale=canvas_scale)
+    
+    # Get top supernodes
+    top_sn = []
+    if supernode_df is not None and show_topk_supernodes:
+        top_sn = get_topk_supernodes(supernode_df, top_k=top_k_supernodes)
+    
+    # Create figure
+    fig, axes = plt.subplots(1, 3, figsize=(12, 4), dpi=dpi)
+    for ax in axes:
+        ax.set_facecolor('white')
+    fig.patch.set_facecolor('white')
+    
+    # --- Panel A: Tissue map ---
+    ax_a = axes[0]
+    if background_image_path and os.path.exists(background_image_path):
+        try:
+            import cv2
+            img = cv2.imread(background_image_path)
+            if img is not None:
+                img = cv2.cvtColor(img, cv2.COLOR_BGR2RGB)
+                ax_a.imshow(img, extent=extent, aspect='auto', alpha=0.9)
+        except Exception:
+            # Fallback to tissue scatter
+            ax_a.scatter(coords[:, 0], coords[:, 1], c='#d9d9d9', s=0.5,
+                        edgecolors='none', rasterized=True)
+    else:
+        # Tissue scatter as placeholder
+        ax_a.scatter(coords[:, 0], coords[:, 1], c='#d9d9d9', s=0.5,
+                    edgecolors='none', rasterized=True)
+    
+    ax_a.set_title('Tissue map', fontsize=9, pad=6)
+    ax_a.set_aspect('equal', adjustable='box')
+    ax_a.invert_yaxis()
+    ax_a.set_xticks([])
+    ax_a.set_yticks([])
+    for spine in ax_a.spines.values():
+        spine.set_visible(False)
+    
+    # --- Panel B: Outline + top supernodes ---
+    ax_b = axes[1]
+    ax_b.scatter(coords[:, 0], coords[:, 1], c='#e8e8e8', s=0.3,
+                edgecolors='none', rasterized=True)
+    
+    # Draw tissue outline
+    if show_tissue_outline and contours:
+        for contour in contours:
+            ax_b.plot(contour[:, 0], contour[:, 1], color=outline_color,
+                     linewidth=outline_width, alpha=0.8)
+    
+    # Draw top supernode boxes
+    for sn in top_sn:
+        rect = Rectangle(
+            (sn['x_min'], sn['y_min']),
+            sn['x_max'] - sn['x_min'],
+            sn['y_max'] - sn['y_min'],
+            linewidth=0.8,
+            edgecolor=topk_outline_color,
+            facecolor='none',
+            alpha=0.7,
+        )
+        ax_b.add_patch(rect)
+    
+    ax_b.set_title('Top-attended super-nodes', fontsize=9, pad=6)
+    ax_b.set_aspect('equal', adjustable='box')
+    ax_b.invert_yaxis()
+    ax_b.set_xticks([])
+    ax_b.set_yticks([])
+    for spine in ax_b.spines.values():
+        spine.set_visible(False)
+    
+    # --- Panel C: Attention heatmap ---
+    ax_c = axes[1 + 1]  # axes[2]
+    cmap = get_colormap(cmap_style)
+    
+    im = ax_c.imshow(canvas, cmap=cmap, extent=extent, aspect='auto',
+                     vmin=0, vmax=1, alpha=alpha, interpolation='bilinear')
+    
+    # Draw tissue outline on heatmap too
+    if show_tissue_outline and contours:
+        for contour in contours:
+            ax_c.plot(contour[:, 0], contour[:, 1], color='white',
+                     linewidth=0.5, alpha=0.6)
+    
+    # Colorbar
+    cbar = plt.colorbar(im, ax=ax_c, shrink=0.7, pad=0.02, ticks=[0, 0.5, 1.0])
+    cbar.set_label('Attention', fontsize=8)
+    cbar.ax.tick_params(labelsize=7)
+    
+    ax_c.set_title(attention_title, fontsize=9, pad=6)
+    ax_c.set_aspect('equal', adjustable='box')
+    ax_c.invert_yaxis()
+    ax_c.set_xticks([])
+    ax_c.set_yticks([])
+    for spine in ax_c.spines.values():
+        spine.set_visible(False)
+    
+    # Add prediction info as subtitle
+    pred_str = ''
+    if pred is not None:
+        pred_str = f'Pred={pred}'
+    if label is not None:
+        pred_str += f'  Label={label}'
+    if prob is not None:
+        prob_val = prob[1] if len(prob) > 1 else prob[0]
+        pred_str += f'  P(LUSC)={prob_val:.3f}'
+    
+    if pred_str:
+        fig.suptitle(f'{slide_id}  {pred_str}', fontsize=8, y=0.98, color='#555555')
+    
+    fig.tight_layout(rect=[0, 0, 1, 0.95])
+    
+    # Save
+    if output_path:
+        os.makedirs(os.path.dirname(output_path) if os.path.dirname(output_path) else '.', exist_ok=True)
+        fig.savefig(output_path, dpi=dpi, bbox_inches='tight', pad_inches=0.05, facecolor='white')
+        
+        if save_pdf:
+            pdf_path = output_path.replace('.png', '.pdf')
+            fig.savefig(pdf_path, format='pdf', bbox_inches='tight', pad_inches=0.05, facecolor='white')
+    
+    plt.close(fig)
+    return output_path
 
 
 # ============================================================
@@ -66,24 +456,7 @@ def get_colormap(style='pathology'):
 
 def verify_alignment(coords, hilbert_idx, raw_feature_path, hilbert_feature_path,
                      n_samples=20, seed=42):
-    """Verify that raw_feature[hilbert_idx] == hilbert_feature.
-    
-    This ensures:
-    1. The hilbert_idx correctly maps raw -> hilbert ordering
-    2. The feature file is indeed Hilbert-ordered
-    3. coords/hilbert_idx/feature token semantics are consistent
-    
-    Args:
-        coords: np.ndarray [N, 2], raw patch coordinates
-        hilbert_idx: np.ndarray [N], permutation index
-        raw_feature_path: path to raw (unsorted) feature .pt file, or None
-        hilbert_feature_path: path to Hilbert-ordered feature .pt file
-        n_samples: number of tokens to sample for detailed report
-        seed: random seed for sampling
-    
-    Returns:
-        dict with alignment report
-    """
+    """Verify that raw_feature[hilbert_idx] == hilbert_feature."""
     report = {
         'status': 'PASS',
         'checks': {},
@@ -92,11 +465,9 @@ def verify_alignment(coords, hilbert_idx, raw_feature_path, hilbert_feature_path
         'sampled_tokens': [],
     }
     
-    # Skip if raw features not provided
     if raw_feature_path is None or not os.path.exists(raw_feature_path):
         report['status'] = 'SKIP'
         report['warnings'].append('Raw feature file not provided or not found')
-        report['warnings'].append('Cannot verify alignment without raw features')
         return report
     
     raw_feat = torch.load(raw_feature_path, map_location='cpu')
@@ -109,21 +480,13 @@ def verify_alignment(coords, hilbert_idx, raw_feature_path, hilbert_feature_path
     
     N = len(coords)
     
-    # Check 1: Length consistency
     len_ok = (len(hilbert_idx) == N == raw_feat.shape[0] == hilbert_feat.shape[0])
-    report['checks']['length_consistency'] = {
-        'passed': len_ok,
-        'coords': N,
-        'hilbert_idx': len(hilbert_idx),
-        'raw_features': raw_feat.shape[0],
-        'hilbert_features': hilbert_feat.shape[0],
-    }
+    report['checks']['length_consistency'] = {'passed': len_ok}
     if not len_ok:
         report['status'] = 'FAIL'
-        report['errors'].append('Length mismatch between coords/hilbert_idx/features')
+        report['errors'].append('Length mismatch')
         return report
     
-    # Check 2: hilbert_idx is a valid permutation
     is_perm = (np.sort(hilbert_idx) == np.arange(N)).all()
     report['checks']['hilbert_idx_is_permutation'] = {'passed': bool(is_perm)}
     if not is_perm:
@@ -131,39 +494,23 @@ def verify_alignment(coords, hilbert_idx, raw_feature_path, hilbert_feature_path
         report['errors'].append('hilbert_idx is not a valid permutation')
         return report
     
-    # Check 3: raw_feature[hilbert_idx] == hilbert_feature (allclose)
     reordered_raw = raw_feat[hilbert_idx]
     allclose = np.allclose(reordered_raw, hilbert_feat, atol=1e-5)
-    max_diff = np.abs(reordered_raw - hilbert_feat).max()
-    mean_diff = np.abs(reordered_raw - hilbert_feat).mean()
-    
+    max_diff = float(np.abs(reordered_raw - hilbert_feat).max())
     report['checks']['feature_alignment'] = {
         'passed': bool(allclose),
-        'max_abs_diff': float(max_diff),
-        'mean_abs_diff': float(mean_diff),
-        'atol_used': 1e-5,
+        'max_abs_diff': max_diff,
     }
     if not allclose:
         report['status'] = 'FAIL'
-        report['errors'].append(
-            f'raw_feature[hilbert_idx] != hilbert_feature (max_diff={max_diff:.6f})'
-        )
+        report['errors'].append(f'Feature alignment failed (max_diff={max_diff:.6f})')
     
-    # Check 4: Coordinate sanity (no NaN/Inf, reasonable range)
     coord_has_nan = np.isnan(coords).any()
     coord_has_inf = np.isinf(coords).any()
     report['checks']['coord_sanity'] = {
         'passed': not (coord_has_nan or coord_has_inf),
-        'has_nan': bool(coord_has_nan),
-        'has_inf': bool(coord_has_inf),
-        'x_range': [float(coords[:, 0].min()), float(coords[:, 0].max())],
-        'y_range': [float(coords[:, 1].min()), float(coords[:, 1].max())],
     }
-    if coord_has_nan or coord_has_inf:
-        report['status'] = 'FAIL'
-        report['errors'].append('Coordinates contain NaN or Inf')
     
-    # Sample tokens for detailed inspection
     rng = np.random.RandomState(seed)
     sample_indices = rng.choice(N, size=min(n_samples, N), replace=False)
     sample_indices.sort()
@@ -173,52 +520,29 @@ def verify_alignment(coords, hilbert_idx, raw_feature_path, hilbert_feature_path
         token_info = {
             'token_idx': int(idx),
             'raw_idx': int(orig_idx),
-            'x': float(coords[idx, 0]) if idx < len(coords) else None,
-            'y': float(coords[idx, 1]) if idx < len(coords) else None,
-            'hilbert_feat_norm': float(np.linalg.norm(hilbert_feat[idx])),
-            'raw_reordered_norm': float(np.linalg.norm(reordered_raw[idx])),
+            'x': float(coords[idx, 0]),
+            'y': float(coords[idx, 1]),
             'feature_match': bool(np.allclose(hilbert_feat[idx], reordered_raw[idx], atol=1e-5)),
         }
         report['sampled_tokens'].append(token_info)
-    
-    # Summary
-    report['summary'] = {
-        'n_tokens': N,
-        'n_checked': len(sample_indices),
-        'all_passed': report['status'] == 'PASS',
-    }
     
     return report
 
 
 # ============================================================
-# Tissue mask filtering
+# Tissue mask
 # ============================================================
 
 def load_tissue_mask(mask_path, coords):
-    """Load tissue mask and determine which patches are tissue.
-    
-    Args:
-        mask_path: path to tissue mask file (h5 or npy)
-        coords: np.ndarray [N, 2], patch coordinates
-    
-    Returns:
-        tissue_mask: np.ndarray [N], boolean (True = tissue)
-    """
+    """Load tissue mask and determine which patches are tissue."""
     if mask_path.endswith('.h5'):
         with h5py.File(mask_path, 'r') as f:
-            if 'tissue_mask' in f:
-                mask = f['tissue_mask'][()]
-            elif 'mask' in f:
-                mask = f['mask'][()]
-            else:
-                raise KeyError(f"No tissue mask found in {mask_path}")
+            mask = f['tissue_mask'][()] if 'tissue_mask' in f else f['mask'][()]
     elif mask_path.endswith('.npy'):
         mask = np.load(mask_path)
     else:
         raise ValueError(f"Unsupported mask format: {mask_path}")
     
-    # Sample mask at patch coordinates
     tissue_flags = []
     for i in range(len(coords)):
         x, y = int(coords[i, 0]), int(coords[i, 1])
@@ -226,55 +550,33 @@ def load_tissue_mask(mask_path, coords):
             tissue_flags.append(mask[y, x] > 0)
         else:
             tissue_flags.append(False)
-    
     return np.array(tissue_flags)
 
 
-def check_tissue_background(patch_attention, coords, tissue_mask=None, 
-                            tissue_threshold=0.5):
-    """Check if high-attention patches are on tissue (not background).
-    
-    Args:
-        patch_attention: np.ndarray [N], attention weights
-        coords: np.ndarray [N, 2], coordinates
-        tissue_mask: np.ndarray [N], boolean (True = tissue), or None
-        tissue_threshold: attention threshold to define "high attention"
-    
-    Returns:
-        dict with tissue/background analysis
-    """
+def check_tissue_background(patch_attention, coords, tissue_mask=None):
+    """Check if high-attention patches are on tissue."""
     report = {
         'tissue_mask_available': tissue_mask is not None,
         'warning': None,
     }
     
     if tissue_mask is None:
-        report['warning'] = 'No tissue mask provided. Manual inspection required.'
+        report['warning'] = 'No tissue mask provided. Heatmap requires manual pathology review.'
         report['high_attn_tissue_ratio'] = None
         return report
     
-    # High attention patches
     attn_threshold = np.percentile(patch_attention, 90)
     high_attn = patch_attention >= attn_threshold
-    
-    # Check what fraction of high-attention patches are on tissue
     high_attn_tissue = high_attn & tissue_mask
-    high_attn_background = high_attn & ~tissue_mask
     
-    report['attn_threshold_90pctl'] = float(attn_threshold)
-    report['n_high_attn'] = int(high_attn.sum())
-    report['n_high_attn_on_tissue'] = int(high_attn_tissue.sum())
-    report['n_high_attn_on_background'] = int(high_attn_background.sum())
     report['high_attn_tissue_ratio'] = float(high_attn_tissue.sum() / max(high_attn.sum(), 1))
-    
-    # Overall tissue ratio
     report['total_tissue_ratio'] = float(tissue_mask.sum() / len(tissue_mask))
     
     return report
 
 
 # ============================================================
-# Core heatmap functions (updated)
+# Core data loading
 # ============================================================
 
 def load_coords_from_h5(h5_path):
@@ -283,8 +585,7 @@ def load_coords_from_h5(h5_path):
         raise FileNotFoundError(f"H5 file not found: {h5_path}")
     with h5py.File(h5_path, 'r') as f:
         if 'coords' not in f:
-            raise KeyError(f"'coords' dataset not found in {h5_path}. "
-                           f"Available keys: {list(f.keys())}")
+            raise KeyError(f"'coords' not in {h5_path}")
         coords = f['coords'][()]
     return coords
 
@@ -302,27 +603,12 @@ def load_hilbert_index(hilbert_pt_path):
 def reorder_coords_by_hilbert(coords, hilbert_idx):
     """Reorder coordinates according to Hilbert curve ordering."""
     if len(coords) != len(hilbert_idx):
-        raise ValueError(
-            f"Coordinate count ({len(coords)}) does not match "
-            f"Hilbert index length ({len(hilbert_idx)})."
-        )
+        raise ValueError(f"Length mismatch: coords={len(coords)}, hilbert_idx={len(hilbert_idx)}")
     return coords[hilbert_idx]
 
 
 def map_supernode_to_patches(n_patches, pool_size, supernode_idx):
-    """Map a super-node index to its corresponding patch indices.
-    
-    After pooling with pool_size, super-node m corresponds to
-    patches [m*pool_size, min((m+1)*pool_size, N)).
-    
-    Args:
-        n_patches: total number of patches
-        pool_size: pooling window size
-        supernode_idx: index of the super-node
-    
-    Returns:
-        list of patch indices
-    """
+    """Map a super-node index to its corresponding patch indices."""
     start = supernode_idx * pool_size
     end = min((supernode_idx + 1) * pool_size, n_patches)
     return list(range(start, end))
@@ -344,46 +630,36 @@ def compute_patch_attention(supernode_attention, n_patches, pool_size, mapping_m
     return patch_attention
 
 
+# ============================================================
+# Legacy scatter heatmap (kept for backward compatibility)
+# ============================================================
+
 def generate_topology_heatmap(coords, patch_attention, slide_id, save_path,
                                title=None, figsize=(10, 10),
-                               cmap_style='pathology', clip_percentile=99,
+                               cmap_style='soft_pathology', clip_percentile=99,
+                               low_clip_percentile=1, gamma=0.7,
                                alpha=0.7, point_size=4, dpi=300,
                                hide_axes=False, variant='paper',
                                stitch_image_path=None):
     """Generate a scatter-plot heatmap of patch-level attention.
     
-    Args:
-        coords: np.ndarray [N, 2], (x, y) coordinates for each patch
-        patch_attention: np.ndarray [N], attention weight per patch (normalized 0-1)
-        slide_id: slide identifier for title
-        save_path: path to save the figure
-        title: optional custom title
-        figsize: figure size
-        cmap_style: colormap style ('jet', 'hot', 'viridis', etc.)
-        clip_percentile: clip attention values above this percentile (0-100)
-        alpha: point transparency
-        point_size: scatter point size
-        dpi: output resolution
-        hide_axes: if True, hide axis labels and ticks
-        variant: 'debug' (with axes/title) or 'paper' (clean)
-        stitch_image_path: unused, kept for API compatibility
+    DEPRECATED for paper use. Use generate_attention_panel_figure() instead.
+    Kept for backward compatibility and debug use.
     """
-    fig, ax = plt.subplots(1, 1, figsize=figsize)
+    # Warning for jet
+    if cmap_style == 'jet':
+        warnings.warn("[WARNING] jet is not recommended for publication heatmaps.")
     
-    # White background
+    fig, ax = plt.subplots(1, 1, figsize=figsize)
     ax.set_facecolor('white')
     fig.patch.set_facecolor('white')
     
-    # Use jet colormap: blue -> cyan -> green -> yellow -> red
-    cmap = plt.cm.jet
+    # Use proper colormap
+    cmap = get_colormap(cmap_style)
     
-    # Normalize attention to 0-1
-    attn_min = patch_attention.min()
-    attn_max = patch_attention.max()
-    if attn_max > attn_min:
-        attn_norm = (patch_attention - attn_min) / (attn_max - attn_min)
-    else:
-        attn_norm = np.zeros_like(patch_attention)
+    # Proper normalization with clipping and gamma
+    attn_norm = normalize_attention(patch_attention, low_clip=low_clip_percentile,
+                                     high_clip=clip_percentile, gamma=gamma)
     
     scatter = ax.scatter(
         coords[:, 0], coords[:, 1],
@@ -394,16 +670,14 @@ def generate_topology_heatmap(coords, patch_attention, slide_id, save_path,
     
     if variant == 'debug':
         cbar = plt.colorbar(scatter, ax=ax, shrink=0.8, ticks=[0, 0.25, 0.5, 0.75, 1.0])
-        cbar.set_label('Attention Weight')
+        cbar.set_label('Projected MIL Super-node Attention')
         if title is None:
-            title = f'DEBUG: {slide_id}'
+            title = f'DEBUG projected super-node attention: {slide_id}'
         ax.set_title(title, fontsize=10)
         ax.set_xlabel('X coordinate')
         ax.set_ylabel('Y coordinate')
     else:
-        # Paper style: minimal
-        cbar = plt.colorbar(scatter, ax=ax, shrink=0.6, pad=0.02, 
-                           ticks=[0, 0.25, 0.5, 0.75, 1.0])
+        cbar = plt.colorbar(scatter, ax=ax, shrink=0.6, pad=0.02, ticks=[0, 0.5, 1.0])
         cbar.set_label('Attention', fontsize=9)
         cbar.ax.tick_params(labelsize=8)
         if title:
@@ -411,23 +685,21 @@ def generate_topology_heatmap(coords, patch_attention, slide_id, save_path,
         if hide_axes:
             ax.set_xticks([])
             ax.set_yticks([])
-            ax.spines['top'].set_visible(False)
-            ax.spines['right'].set_visible(False)
-            ax.spines['bottom'].set_visible(False)
-            ax.spines['left'].set_visible(False)
-        else:
-            ax.set_xlabel('X', fontsize=8)
-            ax.set_ylabel('Y', fontsize=8)
-            ax.tick_params(labelsize=7)
+            for spine in ax.spines.values():
+                spine.set_visible(False)
     
     ax.set_aspect('equal', adjustable='box')
-    ax.invert_yaxis()  # Match image coordinate convention (y down)
+    ax.invert_yaxis()
     fig.tight_layout()
     
     os.makedirs(os.path.dirname(save_path) if os.path.dirname(save_path) else '.', exist_ok=True)
     fig.savefig(save_path, dpi=dpi, bbox_inches='tight', pad_inches=0.1, facecolor='white')
     plt.close(fig)
 
+
+# ============================================================
+# Full pipeline
+# ============================================================
 
 def process_slide_heatmap(slide_id, coords_h5_path, hilbert_pt_path,
                            feature_path, model, pool_size=50,
@@ -437,33 +709,30 @@ def process_slide_heatmap(slide_id, coords_h5_path, hilbert_pt_path,
                            raw_feature_path=None,
                            tissue_mask_path=None,
                            stitch_image_path=None,
-                           cmap_style='pathology',
+                           background_image_path=None,
+                           cmap_style='soft_pathology',
                            clip_percentile=99,
-                           alpha=0.55, point_size=2, dpi=300,
-                           hide_axes=False):
+                           low_clip_percentile=1,
+                           gamma=0.7,
+                           smooth_sigma=1.0,
+                           canvas_scale=32,
+                           alpha=0.65,
+                           point_size=1.5,
+                           dpi=300,
+                           hide_axes=True,
+                           vis_mode='panel',
+                           show_tissue_outline=True,
+                           show_topk_supernodes=True,
+                           top_k_supernodes=10,
+                           outline_color='#31a354',
+                           topk_outline_color='#238b45',
+                           force_paper_heatmap=False,
+                           save_pdf=True):
     """Full pipeline: load data, verify alignment, run model, compute attention, generate heatmaps.
     
     Args:
-        slide_id: slide identifier
-        coords_h5_path: path to .h5 file with coordinates
-        hilbert_pt_path: path to .pt file with Hilbert index
-        feature_path: path to .pt file with Hilbert-ordered features
-        model: MambaMIL model (eval mode)
-        pool_size: pooling window size used in the model
-        output_dir: directory for output files
-        device: torch device
-        attention_mapping: 'assign' or 'distribute'
-        pred: predicted class (optional)
-        prob: prediction probabilities (optional)
-        label: ground truth label (optional)
-        raw_feature_path: path to raw (unsorted) features for alignment check
-        tissue_mask_path: path to tissue mask for background filtering
-        cmap_style: colormap style for heatmap
-        clip_percentile: clip attention above this percentile
-        alpha: point transparency
-        point_size: scatter point size
-        dpi: output DPI
-        hide_axes: hide axis labels in paper figure
+        vis_mode: 'scatter', 'raster', or 'panel'
+        Other args: see CLI help
     
     Returns:
         dict with alignment report, attention data, and output paths
@@ -471,101 +740,75 @@ def process_slide_heatmap(slide_id, coords_h5_path, hilbert_pt_path,
     if device is None:
         device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
     
-    # 1. Load coordinates
+    # 1. Load data
     coords = load_coords_from_h5(coords_h5_path)
-    
-    # 2. Load Hilbert index
     hilbert_idx = load_hilbert_index(hilbert_pt_path)
     
-    # 3. Validate lengths
     if len(hilbert_idx) != len(coords):
-        raise ValueError(
-            f"Hilbert index length ({len(hilbert_idx)}) != coords length ({len(coords)})."
-        )
+        raise ValueError(f"Hilbert index length ({len(hilbert_idx)}) != coords length ({len(coords)}).")
     
-    # 4. Load features
     if not os.path.exists(feature_path):
         raise FileNotFoundError(f"Feature file not found: {feature_path}")
     features = torch.load(feature_path, map_location='cpu')
     if isinstance(features, torch.Tensor):
         features = features.numpy()
     
-    # 5. Reorder coords to match Hilbert-ordered features
     reordered_coords = reorder_coords_by_hilbert(coords, hilbert_idx)
     
     if features.shape[0] != reordered_coords.shape[0]:
-        raise ValueError(
-            f"Feature count ({features.shape[0]}) != reordered coord count ({reordered_coords.shape[0]})."
-        )
+        raise ValueError(f"Feature count ({features.shape[0]}) != coord count ({reordered_coords.shape[0]}).")
     
     N = features.shape[0]
     expected_M = (N + pool_size - 1) // pool_size
     
-    # 6. Alignment verification
-    alignment_report = verify_alignment(
-        coords, hilbert_idx, raw_feature_path, feature_path,
-        n_samples=20, seed=42
-    )
+    # 2. Alignment verification
+    alignment_report = verify_alignment(coords, hilbert_idx, raw_feature_path, feature_path)
     
     if output_dir is None:
         output_dir = os.path.join('heatmap_output', slide_id)
     os.makedirs(output_dir, exist_ok=True)
     
-    # Save alignment report
-    alignment_path = os.path.join(output_dir, 'alignment_report.json')
-    with open(alignment_path, 'w') as f:
+    with open(os.path.join(output_dir, 'alignment_report.json'), 'w') as f:
         json.dump(alignment_report, f, indent=2, default=str)
     
     print(f"  Alignment status: {alignment_report['status']}")
-    if alignment_report['warnings']:
-        for w in alignment_report['warnings']:
-            print(f"    [WARN] {w}")
-    if alignment_report['errors']:
-        for e in alignment_report['errors']:
-            print(f"    [ERROR] {e}")
     
-    # 7. Load tissue mask if available
+    # 3. Load tissue mask
     tissue_mask = None
     if tissue_mask_path and os.path.exists(tissue_mask_path):
         try:
             tissue_mask = load_tissue_mask(tissue_mask_path, reordered_coords)
-            print(f"  Tissue mask loaded: {tissue_mask.sum()}/{len(tissue_mask)} tissue patches")
+            print(f"  Tissue mask: {tissue_mask.sum()}/{len(tissue_mask)} tissue patches")
         except Exception as e:
             print(f"  [WARN] Could not load tissue mask: {e}")
     
-    # 8. Run model forward pass
+    # 4. Run model
     features_tensor = torch.from_numpy(features).float().unsqueeze(0).to(device)
-    
     with torch.no_grad():
         _, Y_prob, Y_hat, A_raw, _ = model(features_tensor)
     
     if A_raw is None:
-        raise ValueError("Model returned A_raw=None. Check model configuration.")
+        raise ValueError("Model returned A_raw=None.")
     
     supernode_attn = A_raw.squeeze().cpu().numpy()
     M = len(supernode_attn)
     
-    if M != expected_M:
-        raise ValueError(
-            f"A_raw supernode count ({M}) != expected ({expected_M})."
-        )
-    
-    # Get prediction info
     if pred is None:
         pred = Y_hat.item()
     if prob is None:
         prob = Y_prob.squeeze().cpu().numpy()
     
-    # 9. Map super-node attention to patches
+    # 5. Compute patch attention
     patch_attn = compute_patch_attention(supernode_attn, N, pool_size, mapping_mode=attention_mapping)
-    attn_max = patch_attn.max()
-    attn_min = patch_attn.min()
-    attn_norm = (patch_attn - attn_min) / (attn_max - attn_min + 1e-8)
+    attn_norm = normalize_attention(patch_attn, low_clip=low_clip_percentile,
+                                     high_clip=clip_percentile, gamma=gamma)
     
-    # 10. Tissue/background check
+    # 6. Tissue/background check
     tissue_report = check_tissue_background(patch_attn, reordered_coords, tissue_mask)
+    if tissue_report.get('warning'):
+        print(f"  [WARNING] {tissue_report['warning']}")
     
-    # 11. Save CSV files
+    # 7. Save CSV files
     
     # patch_attention.csv
     sn_ids = []
@@ -586,6 +829,8 @@ def process_slide_heatmap(slide_id, coords_h5_path, hilbert_pt_path,
         'pred': [pred] * N,
         'prob_0': [float(prob[0])] * N,
         'prob_1': [float(prob[1])] * N if len(prob) > 1 else [float('nan')] * N,
+        'attention_source': ['MIL super-node attention'] * N,
+        'projection_method': [attention_mapping] * N,
     })
     if label is not None:
         patch_df['label'] = [label] * N
@@ -618,58 +863,101 @@ def process_slide_heatmap(slide_id, coords_h5_path, hilbert_pt_path,
     sn_csv_path = os.path.join(output_dir, 'supernode_attention.csv')
     sn_df.to_csv(sn_csv_path, index=False)
     
-    # 12. Generate heatmaps
+    # 8. Generate visualizations
     
-    # Always generate debug heatmap
+    output_paths = {
+        'alignment_report': os.path.join(output_dir, 'alignment_report.json'),
+        'patch_attention_csv': patch_csv_path,
+        'supernode_attention_csv': sn_csv_path,
+    }
+    
+    # Debug scatter (always)
     debug_path = os.path.join(output_dir, 'topology_heatmap_scatter_debug.png')
-    title_debug = f'DEBUG {slide_id} | pred={pred} | attn_mapping={attention_mapping}'
     generate_topology_heatmap(
-        reordered_coords, attn_norm, slide_id, debug_path,
-        title=title_debug, cmap_style=cmap_style, clip_percentile=clip_percentile,
-        alpha=alpha, point_size=point_size, dpi=dpi, hide_axes=False, variant='debug',
-        stitch_image_path=stitch_image_path
+        reordered_coords, patch_attn, slide_id, debug_path,
+        title=f'DEBUG projected super-node attention: {slide_id}',
+        cmap_style='jet_debug', clip_percentile=clip_percentile,
+        low_clip_percentile=low_clip_percentile, gamma=gamma,
+        alpha=alpha, point_size=point_size, dpi=dpi,
+        hide_axes=False, variant='debug'
     )
+    output_paths['debug_heatmap'] = debug_path
     
-    # Paper heatmap: ONLY if alignment passes or is skipped (no raw features)
-    paper_path = None
-    if alignment_report['status'] in ('PASS', 'SKIP'):
-        if alignment_report['status'] == 'SKIP':
-            print(f"  [WARN] Alignment check skipped (no raw features). Paper heatmap generated with caveat.")
-        paper_path = os.path.join(output_dir, 'topology_heatmap_scatter_paper.png')
+    # Paper figures (only if alignment OK)
+    can_generate_paper = alignment_report['status'] in ('PASS', 'SKIP') or force_paper_heatmap
+    
+    if can_generate_paper:
+        # Panel figure
+        panel_path = os.path.join(output_dir, 'topology_attention_panel.png')
+        generate_attention_panel_figure(
+            coords=reordered_coords,
+            patch_attention=patch_attn,
+            supernode_df=sn_df,
+            slide_id=slide_id,
+            output_path=panel_path,
+            background_image_path=background_image_path,
+            label=label, pred=pred, prob=prob,
+            cmap_style=cmap_style,
+            clip_percentile=clip_percentile,
+            low_clip_percentile=low_clip_percentile,
+            gamma=gamma,
+            canvas_scale=canvas_scale,
+            smooth_sigma=smooth_sigma,
+            alpha=alpha,
+            dpi=dpi,
+            show_tissue_outline=show_tissue_outline,
+            show_topk_supernodes=show_topk_supernodes,
+            top_k_supernodes=top_k_supernodes,
+            outline_color=outline_color,
+            topk_outline_color=topk_outline_color,
+            save_pdf=save_pdf,
+        )
+        output_paths['panel_figure'] = panel_path
+        
+        # Paper heatmap (scatter style)
+        paper_path = os.path.join(output_dir, 'topology_attention_heatmap_paper.png')
         label_str = f'L={label}' if label is not None else ''
         pred_str = f'P={pred}'
         title_paper = f'{slide_id} | {pred_str} {label_str}'.strip(' |')
         generate_topology_heatmap(
-            reordered_coords, attn_norm, slide_id, paper_path,
-            title=title_paper, cmap_style=cmap_style, clip_percentile=clip_percentile,
-            alpha=alpha, point_size=point_size, dpi=dpi, hide_axes=hide_axes, variant='paper',
-            stitch_image_path=stitch_image_path
+            reordered_coords, patch_attn, slide_id, paper_path,
+            title=title_paper, cmap_style=cmap_style,
+            clip_percentile=clip_percentile,
+            low_clip_percentile=low_clip_percentile, gamma=gamma,
+            alpha=alpha, point_size=point_size, dpi=dpi,
+            hide_axes=hide_axes, variant='paper'
         )
-        print(f"  Paper heatmap generated: {paper_path}")
+        output_paths['paper_heatmap'] = paper_path
+        
+        print(f"  Panel figure: {panel_path}")
     else:
-        print(f"  [BLOCKED] Paper heatmap NOT generated (alignment failed)")
+        print(f"  [BLOCKED] Paper figures NOT generated (alignment failed)")
     
-    # 13. prediction.json
+    # 9. prediction.json
     pred_info = {
         'slide_id': slide_id,
         'pred': int(pred),
         'probabilities': prob.tolist() if hasattr(prob, 'tolist') else list(prob),
         'attention_mapping': attention_mapping,
+        'attention_source': 'MIL super-node attention',
+        'attention_interpretation': 'class-agnostic aggregation weight, not tumor probability',
         'pool_size': pool_size,
         'n_patches': N,
         'n_supernodes': M,
         'alignment_status': alignment_report['status'],
         'tissue_report': tissue_report,
-        'output_files': {
-            'alignment_report': alignment_path,
-            'debug_heatmap': debug_path,
-            'paper_heatmap': paper_path,
-            'patch_attention_csv': patch_csv_path,
-            'supernode_attention_csv': sn_csv_path,
+        'visualization': {
+            'cmap_style': cmap_style,
+            'vis_mode': vis_mode,
+            'clip_percentile': clip_percentile,
+            'low_clip_percentile': low_clip_percentile,
+            'gamma': gamma,
         },
+        'output_files': output_paths,
     }
     if label is not None:
         pred_info['label'] = int(label)
+    
     with open(os.path.join(output_dir, 'prediction.json'), 'w') as f:
         json.dump(pred_info, f, indent=2, default=str)
     
@@ -680,6 +968,7 @@ def process_slide_heatmap(slide_id, coords_h5_path, hilbert_pt_path,
         'patch_csv_path': patch_csv_path,
         'supernode_csv_path': sn_csv_path,
         'debug_heatmap_path': debug_path,
-        'paper_heatmap_path': paper_path,
+        'paper_heatmap_path': output_paths.get('paper_heatmap'),
+        'panel_figure_path': output_paths.get('panel_figure'),
         'tissue_report': tissue_report,
     }
